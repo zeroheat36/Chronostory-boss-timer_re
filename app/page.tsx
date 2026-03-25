@@ -157,6 +157,30 @@ function toErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
+function playFallbackAlertSound(context: AudioContext | null) {
+  if (!context) {
+    return;
+  }
+
+  const startTime = context.currentTime;
+  for (const [index, offset] of [0, 0.22, 0.44, 0.66].entries()) {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+
+    oscillator.type = index % 2 === 0 ? "square" : "sawtooth";
+    oscillator.frequency.value = index % 2 === 0 ? 988 : 740;
+
+    gain.gain.setValueAtTime(0.0001, startTime + offset);
+    gain.gain.exponentialRampToValueAtTime(0.28, startTime + offset + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + offset + 0.2);
+
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(startTime + offset);
+    oscillator.stop(startTime + offset + 0.22);
+  }
+}
+
 export default function HomePage() {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
   const [backend, setBackend] = useState<"file" | "supabase">("file");
@@ -185,6 +209,7 @@ export default function HomePage() {
   const [collapsedServers, setCollapsedServers] = useState<Record<string, boolean>>({});
 
   const audioContextRef = useRef<AudioContext | null>(null);
+  const alertAudioRef = useRef<HTMLAudioElement | null>(null);
   const titleFlashIntervalRef = useRef<number | null>(null);
   const titleFlashTimeoutRef = useRef<number | null>(null);
   const titleDefaultRef = useRef("크로노스토리 수동 입력 타이머");
@@ -284,41 +309,36 @@ export default function HomePage() {
   }, [dashboard, latestDecisionMap, nowMs, serverFilter, serverSort]);
 
   const playAlertSound = useCallback(() => {
-    const context = audioContextRef.current;
-    if (!context) {
+    const audio = alertAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      const playPromise = audio.play();
+      if (playPromise) {
+        void playPromise.catch(() => {
+          playFallbackAlertSound(audioContextRef.current);
+        });
+      }
       return;
     }
 
-    const startTime = context.currentTime;
-    for (const [index, offset] of [0, 0.22, 0.44, 0.66].entries()) {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-
-      oscillator.type = index % 2 === 0 ? "square" : "sawtooth";
-      oscillator.frequency.value = index % 2 === 0 ? 988 : 740;
-
-      gain.gain.setValueAtTime(0.0001, startTime + offset);
-      gain.gain.exponentialRampToValueAtTime(0.28, startTime + offset + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + offset + 0.2);
-
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start(startTime + offset);
-      oscillator.stop(startTime + offset + 0.22);
-    }
+    playFallbackAlertSound(audioContextRef.current);
   }, []);
 
-  const speakRespawnAlert = useCallback(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+  useEffect(() => {
+    if (typeof window === "undefined") {
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance("Boss Respawn");
-    utterance.volume = 1;
-    utterance.rate = 0.92;
-    utterance.pitch = 1;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+    const audio = new Audio("/audio/boss-respawn.mp3");
+    audio.preload = "auto";
+    audio.volume = 1;
+    alertAudioRef.current = audio;
+
+    return () => {
+      audio.pause();
+      alertAudioRef.current = null;
+    };
   }, []);
 
   const ensureFaviconLink = useCallback(() => {
@@ -559,7 +579,6 @@ export default function HomePage() {
 
     for (const item of newlyReady) {
       playAlertSound();
-      speakRespawnAlert();
       startTitleFlash(`Boss Respawn | ${item.server.name} | ${item.boss.name}`);
 
       if (
@@ -572,7 +591,7 @@ export default function HomePage() {
         });
       }
     }
-  }, [dashboard, nowMs, playAlertSound, speakRespawnAlert, startTitleFlash]);
+  }, [dashboard, nowMs, playAlertSound, startTitleFlash]);
 
   async function refreshDashboard() {
     setErrorMessage("");
