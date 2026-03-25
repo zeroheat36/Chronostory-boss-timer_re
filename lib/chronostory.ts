@@ -3,17 +3,17 @@ const collator = new Intl.Collator("ko-KR", {
   sensitivity: "base"
 });
 
-export const STORAGE_KEY = "chronostory-dashboard-v1";
-export const BOSS_IDS = ["pianus", "genomega"] as const;
+const BOSS_ACCENTS = ["#2a7d8b", "#c35d29", "#6d8e3a", "#8b5fbf", "#9f4f3f", "#2f6ca3"] as const;
+
+export const STORAGE_KEY = "chronostory-dashboard-v2";
 export const MAX_EVENT_LOG = 36;
 
-export type BossId = (typeof BOSS_IDS)[number];
+export type BossId = string;
 
-export type BossMetadata = {
+export type BossDefinition = {
   id: BossId;
   name: string;
   shortLabel: string;
-  description: string;
   accent: string;
 };
 
@@ -62,6 +62,7 @@ export type ReportEvent = {
 };
 
 export type DashboardState = {
+  bossDefinitions: BossDefinition[];
   bossSettings: BossSettings;
   serviceSettings: ServiceSettings;
   servers: ServerTimer[];
@@ -89,6 +90,11 @@ export type ChronostoryAction =
       type: "update-boss-setting";
       bossId: BossId;
       respawnMinutes: number;
+    }
+  | {
+      type: "add-boss";
+      bossName: string;
+      respawnMinutes?: number;
     }
   | {
       type: "update-service-settings";
@@ -132,25 +138,14 @@ export type ReportInput = {
 export type ServerStatus = "active" | "stale" | "archived";
 export type BossUrgency = "empty" | "waiting" | "soon" | "ready";
 
-export const BOSS_METADATA: Record<BossId, BossMetadata> = {
-  pianus: {
-    id: "pianus",
-    name: "피아누스",
-    shortLabel: "Pianus",
-    description: "수중 보스의 처치 시각과 리스폰 타이머를 관리합니다.",
-    accent: "#2a7d8b"
-  },
-  genomega: {
-    id: "genomega",
-    name: "제노메가",
-    shortLabel: "Genomega",
-    description: "기계형 보스의 처치 시각과 리스폰 타이머를 관리합니다.",
-    accent: "#c35d29"
-  }
-};
+export const DEFAULT_BOSS_DEFINITIONS: BossDefinition[] = [
+  { id: "pianus", name: "피아누스", shortLabel: "Pianus", accent: BOSS_ACCENTS[0] },
+  { id: "genomega", name: "제노메가", shortLabel: "Genomega", accent: BOSS_ACCENTS[1] }
+];
 
 export function createInitialDashboardState(): DashboardState {
   return {
+    bossDefinitions: DEFAULT_BOSS_DEFINITIONS,
     bossSettings: {
       pianus: { respawnMinutes: 180 },
       genomega: { respawnMinutes: 240 }
@@ -225,21 +220,8 @@ export function loadDashboardState(raw: string | null): DashboardState {
       return fallback;
     }
 
-    const bossSettings: BossSettings = {
-      pianus: {
-        respawnMinutes: readNumber(
-          parsed.bossSettings?.pianus?.respawnMinutes,
-          fallback.bossSettings.pianus.respawnMinutes
-        )
-      },
-      genomega: {
-        respawnMinutes: readNumber(
-          parsed.bossSettings?.genomega?.respawnMinutes,
-          fallback.bossSettings.genomega.respawnMinutes
-        )
-      }
-    };
-
+    const bossDefinitions = hydrateBossDefinitions(parsed, fallback);
+    const bossSettings = hydrateBossSettings(parsed.bossSettings, bossDefinitions, fallback.bossSettings);
     const serviceSettings: ServiceSettings = {
       activeGraceMinutes: readNumber(
         parsed.serviceSettings?.activeGraceMinutes,
@@ -257,7 +239,7 @@ export function loadDashboardState(raw: string | null): DashboardState {
 
     const servers = Array.isArray(parsed.servers)
       ? parsed.servers
-          .map((server) => hydrateServer(server, bossSettings))
+          .map((server) => hydrateServer(server, bossDefinitions, bossSettings))
           .filter((server): server is ServerTimer => server !== null)
       : [];
 
@@ -269,6 +251,7 @@ export function loadDashboardState(raw: string | null): DashboardState {
       : [];
 
     return {
+      bossDefinitions,
       bossSettings,
       serviceSettings,
       servers: sortServers(servers),
@@ -284,7 +267,7 @@ export function touchServer(
   serverName: string,
   nowIso = new Date().toISOString()
 ): DashboardState {
-  const normalized = normalizeServerName(serverName);
+  const normalized = normalizeLabel(serverName);
   if (!normalized) {
     return state;
   }
@@ -293,18 +276,58 @@ export function touchServer(
   const nextServers = [...state.servers];
 
   if (existingIndex === -1) {
-    nextServers.push(createServerRecord(normalized, nowIso));
+    nextServers.push(createServerRecord(normalized, nowIso, state.bossDefinitions));
   } else {
     const current = nextServers[existingIndex];
     nextServers[existingIndex] = {
       ...current,
-      lastSeenAt: maxIso(current.lastSeenAt, nowIso)
+      lastSeenAt: maxIso(current.lastSeenAt, nowIso),
+      bosses: ensureServerBossTimers(current.bosses, state.bossDefinitions)
     };
   }
 
   return {
     ...state,
     servers: sortServers(nextServers)
+  };
+}
+
+export function addBoss(state: DashboardState, bossName: string, respawnMinutes = 180): DashboardState {
+  const normalizedName = normalizeLabel(bossName);
+  if (!normalizedName) {
+    return state;
+  }
+
+  const existingByName = state.bossDefinitions.find((boss) => boss.name === normalizedName);
+  if (existingByName) {
+    return updateBossRespawnMinutes(state, existingByName.id, respawnMinutes);
+  }
+
+  const bossId = createBossId(normalizedName, state.bossDefinitions);
+  const bossDefinition: BossDefinition = {
+    id: bossId,
+    name: normalizedName,
+    shortLabel: normalizedName,
+    accent: pickBossAccent(state.bossDefinitions.length)
+  };
+  const safeMinutes = clampNumber(respawnMinutes, 1, 24 * 60);
+
+  return {
+    ...state,
+    bossDefinitions: [...state.bossDefinitions, bossDefinition],
+    bossSettings: {
+      ...state.bossSettings,
+      [bossId]: {
+        respawnMinutes: safeMinutes
+      }
+    },
+    servers: state.servers.map((server) => ({
+      ...server,
+      bosses: {
+        ...server.bosses,
+        [bossId]: createEmptyBossTimer(bossId)
+      }
+    }))
   };
 }
 
@@ -328,7 +351,7 @@ export function updateBossRespawnMinutes(
       ...server,
       bosses: {
         ...server.bosses,
-        [bossId]: rebuildTimer(server.bosses[bossId], safeMinutes)
+        [bossId]: rebuildTimer(server.bosses[bossId] ?? createEmptyBossTimer(bossId), safeMinutes)
       }
     }))
   };
@@ -370,7 +393,7 @@ export function removeArchivedServers(state: DashboardState, nowMs: number): Das
 }
 
 export function removeServer(state: DashboardState, serverName: string): DashboardState {
-  const normalized = normalizeServerName(serverName);
+  const normalized = normalizeLabel(serverName);
   if (!normalized) {
     return state;
   }
@@ -394,14 +417,10 @@ export function renameServer(
   serverName: string,
   nextServerName: string
 ): DashboardState {
-  const normalizedCurrent = normalizeServerName(serverName);
-  const normalizedNext = normalizeServerName(nextServerName);
+  const normalizedCurrent = normalizeLabel(serverName);
+  const normalizedNext = normalizeLabel(nextServerName);
 
-  if (!normalizedCurrent || !normalizedNext) {
-    return state;
-  }
-
-  if (normalizedCurrent === normalizedNext) {
+  if (!normalizedCurrent || !normalizedNext || normalizedCurrent === normalizedNext) {
     return state;
   }
 
@@ -409,47 +428,47 @@ export function renameServer(
     throw new Error("같은 이름의 서버가 이미 있습니다.");
   }
 
-  const currentServer = state.servers.find((server) => server.name === normalizedCurrent);
-  if (!currentServer) {
+  if (!state.servers.some((server) => server.name === normalizedCurrent)) {
     return state;
   }
 
-  const nextServers = sortServers(
-    state.servers.map((server) =>
-      server.name === normalizedCurrent
-        ? {
-            ...server,
-            id: createServerId(normalizedNext),
-            name: normalizedNext
-          }
-        : server
-    )
-  );
-
-  const nextEvents = state.events.map((event) =>
-    event.serverName === normalizedCurrent
-      ? {
-          ...event,
-          serverId: createServerId(normalizedNext),
-          serverName: normalizedNext
-        }
-      : event
-  );
-
   return {
     ...state,
-    servers: nextServers,
-    events: nextEvents
+    servers: sortServers(
+      state.servers.map((server) =>
+        server.name === normalizedCurrent
+          ? {
+              ...server,
+              id: createServerId(normalizedNext),
+              name: normalizedNext
+            }
+          : server
+      )
+    ),
+    events: state.events.map((event) =>
+      event.serverName === normalizedCurrent
+        ? {
+            ...event,
+            serverId: createServerId(normalizedNext),
+            serverName: normalizedNext
+          }
+        : event
+    )
   };
 }
 
 export function recordBossKill(state: DashboardState, input: ReportInput): DashboardState {
-  const normalizedServerName = normalizeServerName(input.serverName);
-  const normalizedReporter = normalizeServerName(input.reporter ?? "") || "수동 입력";
+  const normalizedServerName = normalizeLabel(input.serverName);
+  const normalizedReporter = normalizeLabel(input.reporter ?? "") || "수동 입력";
   const normalizedNote = (input.note ?? "").trim();
   const reportedAtMs = Date.parse(input.reportedAt);
+  const bossId = input.bossId;
 
-  if (!normalizedServerName || !Number.isFinite(reportedAtMs)) {
+  if (
+    !normalizedServerName ||
+    !Number.isFinite(reportedAtMs) ||
+    !state.bossDefinitions.some((boss) => boss.id === bossId)
+  ) {
     return state;
   }
 
@@ -457,8 +476,13 @@ export function recordBossKill(state: DashboardState, input: ReportInput): Dashb
   const nowIso = new Date().toISOString();
   const serverIndex = state.servers.findIndex((server) => server.name === normalizedServerName);
   const server =
-    serverIndex === -1 ? createServerRecord(normalizedServerName, reportedAtIso) : state.servers[serverIndex];
-  const timer = server.bosses[input.bossId];
+    serverIndex === -1
+      ? createServerRecord(normalizedServerName, reportedAtIso, state.bossDefinitions)
+      : {
+          ...state.servers[serverIndex],
+          bosses: ensureServerBossTimers(state.servers[serverIndex].bosses, state.bossDefinitions)
+        };
+  const timer = server.bosses[bossId];
   const currentKillMs = timer.lastKillAt ? Date.parse(timer.lastKillAt) : null;
   const duplicateWindowMs = state.serviceSettings.duplicateWindowSeconds * 1000;
 
@@ -479,7 +503,7 @@ export function recordBossKill(state: DashboardState, input: ReportInput): Dashb
       ...timer,
       lastKillAt: reportedAtIso,
       nextRespawnAt: new Date(
-        reportedAtMs + state.bossSettings[input.bossId].respawnMinutes * 60_000
+        reportedAtMs + state.bossSettings[bossId].respawnMinutes * 60_000
       ).toISOString(),
       updatedBy: normalizedReporter,
       note: normalizedNote,
@@ -492,22 +516,20 @@ export function recordBossKill(state: DashboardState, input: ReportInput): Dashb
     lastSeenAt: maxIso(server.lastSeenAt, reportedAtIso),
     bosses: {
       ...server.bosses,
-      [input.bossId]: nextTimer
+      [bossId]: nextTimer
     }
   };
 
   const nextServers =
     serverIndex === -1
       ? sortServers([...state.servers, nextServer])
-      : sortServers(
-          state.servers.map((current, index) => (index === serverIndex ? nextServer : current))
-        );
+      : sortServers(state.servers.map((current, index) => (index === serverIndex ? nextServer : current)));
 
   const event: ReportEvent = {
-    id: createEventId(normalizedServerName, input.bossId, reportedAtIso, nowIso),
+    id: createEventId(normalizedServerName, bossId, reportedAtIso, nowIso),
     serverId: nextServer.id,
     serverName: normalizedServerName,
-    bossId: input.bossId,
+    bossId,
     reportedAt: reportedAtIso,
     submittedAt: nowIso,
     reporter: normalizedReporter,
@@ -590,9 +612,7 @@ export function formatDuration(durationMs: number): string {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
 
-  return [hours, minutes, seconds]
-    .map((value) => String(value).padStart(2, "0"))
-    .join(":");
+  return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
 }
 
 export function formatLocalTimestamp(value: string | null): string {
@@ -642,7 +662,7 @@ export function getDashboardSummary(state: DashboardState, nowMs: number) {
     activeServers: 0,
     staleServers: 0,
     archivedServers: 0,
-    trackedBosses: state.servers.length * BOSS_IDS.length,
+    trackedBosses: state.servers.length * state.bossDefinitions.length,
     readyBosses: 0,
     pendingBosses: 0
   };
@@ -657,8 +677,8 @@ export function getDashboardSummary(state: DashboardState, nowMs: number) {
       summary.archivedServers += 1;
     }
 
-    for (const bossId of BOSS_IDS) {
-      const nextRespawnAt = server.bosses[bossId].nextRespawnAt;
+    for (const boss of state.bossDefinitions) {
+      const nextRespawnAt = server.bosses[boss.id]?.nextRespawnAt ?? null;
       if (nextRespawnAt && Date.parse(nextRespawnAt) <= nowMs) {
         summary.readyBosses += 1;
       } else {
@@ -688,13 +708,81 @@ export function fromLocalInputValue(value: string): string | null {
   return parsed.toISOString();
 }
 
-function hydrateServer(value: unknown, bossSettings: BossSettings): ServerTimer | null {
+function hydrateBossDefinitions(parsed: Partial<DashboardState>, fallback: DashboardState): BossDefinition[] {
+  if (Array.isArray(parsed.bossDefinitions) && parsed.bossDefinitions.length > 0) {
+    const definitions = parsed.bossDefinitions
+      .map((value, index) => hydrateBossDefinition(value, index))
+      .filter((value): value is BossDefinition => value !== null);
+
+    if (definitions.length > 0) {
+      return definitions;
+    }
+  }
+
+  const legacyKeys = parsed.bossSettings ? Object.keys(parsed.bossSettings) : [];
+  if (legacyKeys.length > 0) {
+    return legacyKeys.map((bossId, index) => {
+      const legacy = fallback.bossDefinitions.find((boss) => boss.id === bossId);
+      return (
+        legacy ?? {
+          id: bossId,
+          name: bossId,
+          shortLabel: bossId,
+          accent: pickBossAccent(index)
+        }
+      );
+    });
+  }
+
+  return fallback.bossDefinitions;
+}
+
+function hydrateBossDefinition(value: unknown, index: number): BossDefinition | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<BossDefinition>;
+  const id = normalizeBossId(String(candidate.id ?? ""));
+  const name = normalizeLabel(String(candidate.name ?? ""));
+  if (!id || !name) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    shortLabel: normalizeLabel(String(candidate.shortLabel ?? "")) || name,
+    accent: typeof candidate.accent === "string" && candidate.accent ? candidate.accent : pickBossAccent(index)
+  };
+}
+
+function hydrateBossSettings(
+  value: unknown,
+  bossDefinitions: BossDefinition[],
+  fallback: BossSettings
+): BossSettings {
+  const candidate = value && typeof value === "object" ? (value as Partial<BossSettings>) : {};
+
+  return bossDefinitions.reduce<BossSettings>((accumulator, boss) => {
+    accumulator[boss.id] = {
+      respawnMinutes: readNumber(candidate?.[boss.id]?.respawnMinutes, fallback[boss.id]?.respawnMinutes ?? 180)
+    };
+    return accumulator;
+  }, {});
+}
+
+function hydrateServer(
+  value: unknown,
+  bossDefinitions: BossDefinition[],
+  bossSettings: BossSettings
+): ServerTimer | null {
   if (!value || typeof value !== "object") {
     return null;
   }
 
   const candidate = value as Partial<ServerTimer>;
-  const name = normalizeServerName(candidate.name ?? "");
+  const name = normalizeLabel(candidate.name ?? "");
   const createdAt = readIso(candidate.createdAt);
   const lastSeenAt = readIso(candidate.lastSeenAt);
 
@@ -707,14 +795,14 @@ function hydrateServer(value: unknown, bossSettings: BossSettings): ServerTimer 
     name,
     createdAt,
     lastSeenAt,
-    bosses: {
-      pianus: hydrateBossTimer(candidate.bosses?.pianus, "pianus", bossSettings.pianus.respawnMinutes),
-      genomega: hydrateBossTimer(
-        candidate.bosses?.genomega,
-        "genomega",
-        bossSettings.genomega.respawnMinutes
-      )
-    }
+    bosses: bossDefinitions.reduce<Record<BossId, BossTimer>>((accumulator, boss) => {
+      accumulator[boss.id] = hydrateBossTimer(
+        candidate.bosses?.[boss.id],
+        boss.id,
+        bossSettings[boss.id].respawnMinutes
+      );
+      return accumulator;
+    }, {})
   };
 }
 
@@ -746,22 +834,18 @@ function hydrateEvent(value: unknown): ReportEvent | null {
   }
 
   const candidate = value as Partial<ReportEvent>;
-  if (!isBossId(candidate.bossId)) {
-    return null;
-  }
-
   const decision = candidate.decision;
   if (decision !== "accepted" && decision !== "duplicate" && decision !== "ignored_old") {
     return null;
   }
 
+  const bossId = normalizeBossId(String(candidate.bossId ?? ""));
   const reportedAt = readIso(candidate.reportedAt);
   const submittedAt = readIso(candidate.submittedAt);
   const serverId = typeof candidate.serverId === "string" ? candidate.serverId : "";
-  const serverName = normalizeServerName(candidate.serverName ?? "");
-  const reporter = typeof candidate.reporter === "string" ? candidate.reporter : "";
+  const serverName = normalizeLabel(candidate.serverName ?? "");
 
-  if (!reportedAt || !submittedAt || !serverId || !serverName) {
+  if (!bossId || !reportedAt || !submittedAt || !serverId || !serverName) {
     return null;
   }
 
@@ -769,28 +853,28 @@ function hydrateEvent(value: unknown): ReportEvent | null {
     id:
       typeof candidate.id === "string"
         ? candidate.id
-        : createEventId(serverName, candidate.bossId, reportedAt, submittedAt),
+        : createEventId(serverName, bossId, reportedAt, submittedAt),
     serverId,
     serverName,
-    bossId: candidate.bossId,
+    bossId,
     reportedAt,
     submittedAt,
-    reporter,
+    reporter: typeof candidate.reporter === "string" ? candidate.reporter : "",
     note: typeof candidate.note === "string" ? candidate.note : "",
     decision
   };
 }
 
-function createServerRecord(name: string, nowIso: string): ServerTimer {
+function createServerRecord(name: string, nowIso: string, bossDefinitions: BossDefinition[]): ServerTimer {
   return {
     id: createServerId(name),
     name,
     createdAt: nowIso,
     lastSeenAt: nowIso,
-    bosses: {
-      pianus: createEmptyBossTimer("pianus"),
-      genomega: createEmptyBossTimer("genomega")
-    }
+    bosses: bossDefinitions.reduce<Record<BossId, BossTimer>>((accumulator, boss) => {
+      accumulator[boss.id] = createEmptyBossTimer(boss.id);
+      return accumulator;
+    }, {})
   };
 }
 
@@ -828,24 +912,60 @@ function rebuildTimer(timer: BossTimer, respawnMinutes: number): BossTimer {
   };
 }
 
+function ensureServerBossTimers(
+  timers: Record<BossId, BossTimer>,
+  bossDefinitions: BossDefinition[]
+): Record<BossId, BossTimer> {
+  return bossDefinitions.reduce<Record<BossId, BossTimer>>((accumulator, boss) => {
+    accumulator[boss.id] = timers[boss.id] ?? createEmptyBossTimer(boss.id);
+    return accumulator;
+  }, {});
+}
+
 function sortServers(servers: ServerTimer[]): ServerTimer[] {
   return [...servers].sort((left, right) => collator.compare(left.name, right.name));
 }
 
+function pickBossAccent(index: number): string {
+  return BOSS_ACCENTS[index % BOSS_ACCENTS.length];
+}
+
 function createServerId(name: string): string {
-  return `server:${normalizeServerName(name).toLowerCase()}`;
+  return `server:${normalizeLabel(name).toLowerCase()}`;
 }
 
 function createEventId(serverName: string, bossId: BossId, reportedAt: string, submittedAt: string): string {
   return `${serverName}:${bossId}:${reportedAt}:${submittedAt}`;
 }
 
+function createBossId(name: string, bossDefinitions: BossDefinition[]): string {
+  const base = normalizeBossId(name);
+  if (!bossDefinitions.some((boss) => boss.id === base)) {
+    return base;
+  }
+
+  let index = 2;
+  while (bossDefinitions.some((boss) => boss.id === `${base}-${index}`)) {
+    index += 1;
+  }
+
+  return `${base}-${index}`;
+}
+
 function maxIso(left: string, right: string): string {
   return Date.parse(left) >= Date.parse(right) ? left : right;
 }
 
-function normalizeServerName(value: string): string {
+function normalizeLabel(value: string): string {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function normalizeBossId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "";
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -862,8 +982,4 @@ function readIso(value: unknown): string | null {
   }
 
   return Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
-}
-
-function isBossId(value: unknown): value is BossId {
-  return value === "pianus" || value === "genomega";
 }

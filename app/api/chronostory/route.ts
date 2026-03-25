@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import {
-  BOSS_IDS,
+  addBoss,
   createDemoDashboardState,
   createInitialDashboardState,
   recordBossKill,
@@ -48,6 +48,8 @@ export async function POST(request: Request) {
           });
         case "update-boss-setting":
           return updateBossRespawnMinutes(current, action.bossId, action.respawnMinutes);
+        case "add-boss":
+          return addBoss(current, action.bossName, action.respawnMinutes);
         case "update-service-settings":
           return updateServiceSettings(current, {
             activeGraceMinutes: action.activeGraceMinutes,
@@ -91,15 +93,17 @@ function isChronostoryAction(value: unknown): value is ChronostoryAction {
       return (
         typeof value.serverName === "string" &&
         typeof value.reportedAt === "string" &&
-        isBossIdString(value.bossId) &&
+        typeof value.bossId === "string" &&
         (typeof value.reporter === "undefined" || typeof value.reporter === "string") &&
         (typeof value.note === "undefined" || typeof value.note === "string")
       );
     case "update-boss-setting":
       return (
-        isBossIdString(value.bossId) &&
+        typeof value.bossId === "string" &&
         typeof value.respawnMinutes === "number"
       );
+    case "add-boss":
+      return typeof value.bossName === "string" && isOptionalNumber(value.respawnMinutes);
     case "update-service-settings":
       return (
         isOptionalNumber(value.activeGraceMinutes) &&
@@ -126,8 +130,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isOptionalNumber(value: unknown) {
   return typeof value === "undefined" || typeof value === "number";
-}
-
-function isBossIdString(value: unknown): value is (typeof BOSS_IDS)[number] {
-  return typeof value === "string" && BOSS_IDS.includes(value as (typeof BOSS_IDS)[number]);
 }

@@ -1,5 +1,4 @@
 import {
-  BOSS_IDS,
   recordBossKill,
   touchServer,
   type BossId,
@@ -58,7 +57,7 @@ export function isChronostoryWebhookPayload(value: unknown): value is Chronostor
     case "boss-kill":
       return (
         typeof value.serverName === "string" &&
-        isBossIdString(value.bossId) &&
+        typeof value.bossId === "string" &&
         (typeof value.reportedAt === "undefined" || typeof value.reportedAt === "string") &&
         (typeof value.reporter === "undefined" || typeof value.reporter === "string") &&
         (typeof value.note === "undefined" || typeof value.note === "string")
@@ -75,8 +74,4 @@ export function isChronostoryWebhookPayload(value: unknown): value is Chronostor
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function isBossIdString(value: unknown): value is (typeof BOSS_IDS)[number] {
-  return typeof value === "string" && BOSS_IDS.includes(value as (typeof BOSS_IDS)[number]);
 }

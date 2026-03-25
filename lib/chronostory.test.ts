@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  addBoss,
   createInitialDashboardState,
   getServerStatus,
   recordBossKill,
@@ -32,6 +33,22 @@ test("accepts a new boss report and calculates the next respawn time", () => {
   assert.equal(next.servers[0].bosses.pianus.lastKillAt, "2026-03-25T01:00:00.000Z");
   assert.equal(next.servers[0].bosses.pianus.nextRespawnAt, "2026-03-25T04:00:00.000Z");
   assert.equal(next.servers[0].bosses.pianus.version, 1);
+});
+
+test("allows adding a custom boss and tracks its timer", () => {
+  const state = addBoss(createInitialDashboardState(), "혼테일", 90);
+
+  assert.equal(state.bossDefinitions.some((boss) => boss.name === "혼테일"), true);
+  assert.equal(state.bossSettings["혼테일"].respawnMinutes, 90);
+
+  const next = recordBossKill(state, {
+    serverName: "Chrono 1",
+    bossId: "혼테일",
+    reportedAt: "2026-03-25T01:00:00.000Z",
+    reporter: "Operator"
+  });
+
+  assert.equal(next.servers[0].bosses["혼테일"].nextRespawnAt, "2026-03-25T02:30:00.000Z");
 });
 
 test("treats nearby duplicate reports as log-only events", () => {

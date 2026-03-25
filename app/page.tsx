@@ -1,10 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import styles from "./page.module.css";
 import {
-  BOSS_IDS,
-  BOSS_METADATA,
-  createInitialDashboardState,
   formatLocalTimestamp,
   formatRelativeAge,
   fromLocalInputValue,
@@ -13,480 +11,633 @@ import {
   getDashboardSummary,
   getServerStatus,
   toLocalInputValue,
+  type BossDefinition,
   type BossId,
+  type BossUrgency,
   type ChronostoryAction,
   type ChronostoryResponse,
   type DashboardState,
   type ReportDecision,
-  type ReportEvent,
+  type ServerStatus,
   type ServerTimer
 } from "@/lib/chronostory";
-import styles from "./page.module.css";
-
-const POLL_INTERVAL_MS = 15_000;
-const REPORTER_PRESETS = ["본인", "파티원", "길드원", "운영자"] as const;
 
 type SetupStatus = {
   backend: "file" | "supabase";
   supabaseReady: boolean;
   missingServerVars: string[];
+  missingClientVars: string[];
+  webhookReady: boolean;
+  missingWebhookVars: string[];
+  webhookPath: string;
 };
 
-type ReportFormState = {
-  serverName: string;
-  bossId: BossId;
-  occurredAt: string;
-  reporter: string;
-  note: string;
-};
+type ServerFilter = "all" | "active" | "stale" | "archived" | "review";
+type ServerSort = "soon" | "recent" | "name";
 
-type RenameFormState = {
-  serverName: string;
-  nextServerName: string;
-};
+const REPORTER_PRESETS = ["본인", "파티원", "길드원", "운영자"];
+const FLASH_INTERVAL_MS = 700;
+const FLASH_DURATION_MS = 15_000;
 
-type LogDecisionFilter = "all" | ReportDecision;
-type ServerSortMode = "respawn" | "recent" | "name";
-type ServerVisibilityFilter = "all" | "active" | "stale" | "archived" | "flagged";
+const TIME_ADJUSTMENTS = [
+  { label: "지금", mode: "now" as const, minutes: 0 },
+  { label: "-10분", mode: "delta" as const, minutes: -10 },
+  { label: "-5분", mode: "delta" as const, minutes: -5 },
+  { label: "-1분", mode: "delta" as const, minutes: -1 },
+  { label: "+1분", mode: "delta" as const, minutes: 1 },
+  { label: "+5분", mode: "delta" as const, minutes: 5 }
+];
 
-const DECISION_COPY: Record<ReportDecision, string> = {
-  accepted: "확정 입력",
-  duplicate: "중복 제보",
-  ignored_old: "오래된 제보"
-};
-
-const VALIDATION_COPY: Record<ReportDecision, string> = {
-  accepted: "최근 입력 확정",
-  duplicate: "중복 제보 감지",
-  ignored_old: "오래된 제보 감지"
-};
-
-const URGENCY_COPY = {
-  empty: "기록 없음",
-  waiting: "대기 중",
-  soon: "곧 리스폰",
-  ready: "리스폰 가능"
-} as const;
-
-function getReviewSummary(events: ReportEvent[]) {
-  return events.reduce(
-    (accumulator, event) => {
-      if (event.decision === "accepted") {
-        accumulator.accepted += 1;
-      } else {
-        accumulator.flagged += 1;
-      }
-      return accumulator;
+function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  return fetch(url, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {})
     },
-    { accepted: 0, flagged: 0 }
-  );
-}
-
-function getLatestBossEvent(events: ReportEvent[], serverName: string, bossId: BossId) {
-  return events.find((event) => event.serverName === serverName && event.bossId === bossId) ?? null;
-}
-
-function getNearestRespawnMs(server: ServerTimer, now: number) {
-  const candidates = BOSS_IDS.map((bossId) => {
-    const value = server.bosses[bossId].nextRespawnAt;
-    if (!value) return Number.POSITIVE_INFINITY;
-
-    const targetMs = Date.parse(value);
-    if (!Number.isFinite(targetMs)) return Number.POSITIVE_INFINITY;
-
-    return Math.max(0, targetMs - now);
-  });
-
-  return Math.min(...candidates);
-}
-
-function getLatestSeenMs(server: ServerTimer) {
-  const timestamp = Date.parse(server.lastSeenAt);
-  return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
-}
-
-function compareServers(left: ServerTimer, right: ServerTimer, now: number, mode: ServerSortMode) {
-  if (mode === "name") {
-    return left.name.localeCompare(right.name, "ko-KR", { numeric: true });
-  }
-
-  if (mode === "recent") {
-    return Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
-  }
-
-  return getNearestRespawnMs(left, now) - getNearestRespawnMs(right, now);
-}
-
-function hasFlaggedBoss(server: ServerTimer, events: ReportEvent[]) {
-  return BOSS_IDS.some((bossId) => {
-    const latestEvent = getLatestBossEvent(events, server.name, bossId);
-    return latestEvent !== null && latestEvent.decision !== "accepted";
+    cache: "no-store"
+  }).then(async (response) => {
+    const data = (await response.json()) as { error?: string };
+    if (!response.ok) {
+      throw new Error(data.error ?? "요청에 실패했습니다.");
+    }
+    return data as T;
   });
 }
 
-function matchesServerVisibility(
-  server: ServerTimer,
+function parseMinuteDraft(value: string) {
+  if (!value.trim()) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return null;
+  }
+
+  return Math.min(Math.floor(parsed), 24 * 60);
+}
+
+function getNearestRespawnDelta(server: ServerTimer, bosses: BossDefinition[], nowMs: number) {
+  const deltas = bosses
+    .map((boss) => {
+      const nextRespawnAt = server.bosses[boss.id]?.nextRespawnAt;
+      if (!nextRespawnAt) {
+        return Number.POSITIVE_INFINITY;
+      }
+
+      const parsed = Date.parse(nextRespawnAt);
+      if (!Number.isFinite(parsed)) {
+        return Number.POSITIVE_INFINITY;
+      }
+
+      return Math.max(0, parsed - nowMs);
+    })
+    .filter((value) => Number.isFinite(value));
+
+  if (deltas.length === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return Math.min(...deltas);
+}
+
+function compareSoonness(
+  left: ServerTimer,
+  right: ServerTimer,
   dashboard: DashboardState,
-  now: number,
-  filter: ServerVisibilityFilter
+  nowMs: number
 ) {
-  if (filter === "all") {
-    return true;
+  const leftSoon = getNearestRespawnDelta(left, dashboard.bossDefinitions, nowMs);
+  const rightSoon = getNearestRespawnDelta(right, dashboard.bossDefinitions, nowMs);
+
+  if (leftSoon !== rightSoon) {
+    return leftSoon - rightSoon;
   }
 
-  if (filter === "flagged") {
-    return hasFlaggedBoss(server, dashboard.events);
-  }
-
-  return getServerStatus(server, dashboard.serviceSettings, now) === filter;
+  return Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
 }
 
-function ServerCard({
-  server,
-  now,
-  dashboard,
-  saving,
-  collapsed,
-  highlightLabels,
-  onToggleCollapse,
-  onQuickReset,
-  onHeartbeat,
-  onRemoveServer
-}: {
-  server: ServerTimer;
-  now: number;
-  dashboard: DashboardState;
-  saving: boolean;
-  collapsed: boolean;
-  highlightLabels: string[];
-  onToggleCollapse: (serverName: string) => void;
-  onQuickReset: (serverName: string, bossId: BossId) => Promise<void>;
-  onHeartbeat: (serverName: string) => Promise<void>;
-  onRemoveServer: (serverName: string) => Promise<void>;
-}) {
-  const status = getServerStatus(server, dashboard.serviceSettings, now);
+function getStatusLabel(status: ServerStatus) {
+  switch (status) {
+    case "active":
+      return "활성 서버";
+    case "stale":
+      return "유예 서버";
+    case "archived":
+      return "보관 서버";
+  }
+}
 
-  return (
-    <article className={`${styles.serverCard} ${highlightLabels.length > 0 ? styles.serverCardHighlighted : ""}`}>
-      <div className={styles.serverTop}>
-        <div>
-          <h3>{server.name}</h3>
-          <p>
-            마지막 입력 {formatLocalTimestamp(server.lastSeenAt)} / {formatRelativeAge(server.lastSeenAt, now)}
-          </p>
-        </div>
-        <div className={styles.serverActions}>
-          {highlightLabels.map((label) => (
-            <span key={label} className={styles.priorityBadge}>
-              {label}
-            </span>
-          ))}
-          <span className={`${styles.statusBadge} ${styles[`status_${status}`]}`}>
-            {status === "active" ? "활성" : status === "stale" ? "유예" : "보관"}
-          </span>
-          <button
-            className={styles.ghostButton}
-            type="button"
-            onClick={() => onToggleCollapse(server.name)}
-            disabled={saving}
-          >
-            {collapsed ? "펼치기" : "접기"}
-          </button>
-          <button className={styles.ghostButton} type="button" onClick={() => void onHeartbeat(server.name)} disabled={saving}>
-            heartbeat
-          </button>
-          <button className={styles.dangerButton} type="button" onClick={() => void onRemoveServer(server.name)} disabled={saving}>
-            삭제
-          </button>
-        </div>
-      </div>
+function getUrgencyLabel(urgency: BossUrgency) {
+  switch (urgency) {
+    case "empty":
+      return "기록 없음";
+    case "waiting":
+      return "대기 중";
+    case "soon":
+      return "곧 리스폰";
+    case "ready":
+      return "리스폰 가능";
+  }
+}
 
-      <div className={`${styles.bossGrid} ${collapsed ? styles.bossGridCollapsed : ""}`}>
-        {BOSS_IDS.map((bossId) => {
-          const timer = server.bosses[bossId];
-          const urgency = getBossUrgency(timer.nextRespawnAt, now);
-          const latestEvent = getLatestBossEvent(dashboard.events, server.name, bossId);
+function getDecisionLabel(decision: ReportDecision) {
+  switch (decision) {
+    case "accepted":
+      return "확정 입력";
+    case "duplicate":
+      return "중복 제보";
+    case "ignored_old":
+      return "오래된 제보";
+  }
+}
 
-          return (
-            <section
-              key={bossId}
-              className={`${styles.bossCard} ${styles[`bossCard_${urgency}`]}`}
-              style={{ ["--boss-accent" as string]: BOSS_METADATA[bossId].accent }}
-            >
-              <div className={styles.bossHeader}>
-                <div>
-                  <p>{BOSS_METADATA[bossId].shortLabel}</p>
-                  <h4>{BOSS_METADATA[bossId].name}</h4>
-                </div>
-                <span>{dashboard.bossSettings[bossId].respawnMinutes}분</span>
-              </div>
-
-              <div className={styles.bossStateRow}>
-                <span className={`${styles.urgencyBadge} ${styles[`urgency_${urgency}`]}`}>
-                  {URGENCY_COPY[urgency]}
-                </span>
-                {latestEvent ? (
-                  <span className={`${styles.validationBadge} ${styles[`validation_${latestEvent.decision}`]}`}>
-                    {VALIDATION_COPY[latestEvent.decision]}
-                  </span>
-                ) : null}
-              </div>
-
-              <div className={`${styles.timerValue} ${styles[`timer_${urgency}`]}`}>
-                {getCountdownLabel(timer.nextRespawnAt, now)}
-              </div>
-
-              <dl className={styles.metaGrid}>
-                <div>
-                  <dt>최근 처치</dt>
-                  <dd>{formatLocalTimestamp(timer.lastKillAt)}</dd>
-                </div>
-                <div>
-                  <dt>다음 리스폰</dt>
-                  <dd>{formatLocalTimestamp(timer.nextRespawnAt)}</dd>
-                </div>
-                <div>
-                  <dt>갱신자</dt>
-                  <dd>{timer.updatedBy || "-"}</dd>
-                </div>
-                <div>
-                  <dt>최근 판정</dt>
-                  <dd>{latestEvent ? DECISION_COPY[latestEvent.decision] : "-"}</dd>
-                </div>
-              </dl>
-
-              {timer.note ? <p className={styles.noteLine}>{timer.note}</p> : null}
-
-              <button
-                className={styles.primaryButton}
-                type="button"
-                onClick={() => void onQuickReset(server.name, bossId)}
-                disabled={saving}
-              >
-                지금 시각으로 초기화
-              </button>
-            </section>
-          );
-        })}
-      </div>
-    </article>
-  );
+function toErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 export default function HomePage() {
-  const [dashboard, setDashboard] = useState<DashboardState>(() => createInitialDashboardState());
-  const [backend, setBackend] = useState<ChronostoryResponse["backend"]>("file");
-  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [dashboard, setDashboard] = useState<DashboardState | null>(null);
+  const [backend, setBackend] = useState<"file" | "supabase">("file");
+  const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
-  const [serverDraft, setServerDraft] = useState("");
-  const [logQuery, setLogQuery] = useState("");
-  const [logDecisionFilter, setLogDecisionFilter] = useState<LogDecisionFilter>("all");
-  const [logBossFilter, setLogBossFilter] = useState<"all" | BossId>("all");
-  const [serverSortMode, setServerSortMode] = useState<ServerSortMode>("respawn");
-  const [serverVisibilityFilter, setServerVisibilityFilter] = useState<ServerVisibilityFilter>("all");
-  const [collapsedServers, setCollapsedServers] = useState<string[]>([]);
-  const [renameForm, setRenameForm] = useState<RenameFormState>({ serverName: "", nextServerName: "" });
-  const [reportForm, setReportForm] = useState<ReportFormState>({
-    serverName: "",
-    bossId: "pianus",
-    occurredAt: toLocalInputValue(),
-    reporter: "",
-    note: ""
-  });
+  const [isBusy, setIsBusy] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState("");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [notificationPermission, setNotificationPermission] = useState("default");
 
-  useEffect(() => {
-    const timerId = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timerId);
-  }, []);
+  const [serverNameInput, setServerNameInput] = useState("");
+  const [renameSource, setRenameSource] = useState("");
+  const [renameTarget, setRenameTarget] = useState("");
+  const [reportServerName, setReportServerName] = useState("");
+  const [reportBossId, setReportBossId] = useState("");
+  const [reporter, setReporter] = useState("본인");
+  const [reportNote, setReportNote] = useState("");
+  const [reportedAtInput, setReportedAtInput] = useState(() => toLocalInputValue());
 
-  useEffect(() => {
-    void refreshDashboard(true);
-    const pollId = window.setInterval(() => void refreshDashboard(false), POLL_INTERVAL_MS);
-    return () => window.clearInterval(pollId);
-  }, []);
+  const [bossNameInput, setBossNameInput] = useState("");
+  const [bossRespawnInput, setBossRespawnInput] = useState("180");
+  const [respawnDrafts, setRespawnDrafts] = useState<Record<string, string>>({});
 
-  useEffect(() => {
-    setCollapsedServers((current) =>
-      current.filter((serverName) => dashboard.servers.some((server) => server.name === serverName))
-    );
-  }, [dashboard.servers]);
+  const [serverFilter, setServerFilter] = useState<ServerFilter>("all");
+  const [serverSort, setServerSort] = useState<ServerSort>("soon");
+  const [collapsedServers, setCollapsedServers] = useState<Record<string, boolean>>({});
 
-  async function refreshDashboard(showLoader = false) {
-    if (showLoader) setLoading(true);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const titleFlashIntervalRef = useRef<number | null>(null);
+  const titleFlashTimeoutRef = useRef<number | null>(null);
+  const titleDefaultRef = useRef("크로노스토리 수동 입력 타이머");
+  const readyStateRef = useRef<Map<string, boolean>>(new Map());
+  const readyStateInitializedRef = useRef(false);
 
-    try {
-      const [dashboardResponse, setupResponse] = await Promise.all([
-        fetch("/api/chronostory", { cache: "no-store" }),
-        fetch("/api/chronostory/setup", { cache: "no-store" })
-      ]);
+  const bossDefinitions = dashboard?.bossDefinitions ?? [];
+  const summary = useMemo(
+    () => (dashboard ? getDashboardSummary(dashboard, nowMs) : null),
+    [dashboard, nowMs]
+  );
 
-      if (!dashboardResponse.ok || !setupResponse.ok) {
-        throw new Error("대시보드 정보를 불러오지 못했습니다.");
+  const latestDecisionMap = useMemo(() => {
+    const map = new Map<string, ReportDecision>();
+    if (!dashboard) {
+      return map;
+    }
+
+    for (const event of dashboard.events) {
+      const key = `${event.serverName}:${event.bossId}`;
+      if (!map.has(key)) {
+        map.set(key, event.decision);
+      }
+    }
+
+    return map;
+  }, [dashboard]);
+
+  const recentServerNames = useMemo(() => {
+    if (!dashboard) {
+      return [];
+    }
+
+    const seen = new Set<string>();
+    const names: string[] = [];
+
+    for (const event of dashboard.events) {
+      if (!seen.has(event.serverName)) {
+        names.push(event.serverName);
+        seen.add(event.serverName);
+      }
+      if (names.length >= 6) {
+        break;
+      }
+    }
+
+    for (const server of dashboard.servers) {
+      if (!seen.has(server.name)) {
+        names.push(server.name);
+        seen.add(server.name);
+      }
+      if (names.length >= 6) {
+        break;
+      }
+    }
+
+    return names;
+  }, [dashboard]);
+
+  const visibleServers = useMemo(() => {
+    if (!dashboard) {
+      return [];
+    }
+
+    const filtered = dashboard.servers.filter((server) => {
+      const status = getServerStatus(server, dashboard.serviceSettings, nowMs);
+      const hasReview = dashboard.bossDefinitions.some((boss) => {
+        const decision = latestDecisionMap.get(`${server.name}:${boss.id}`);
+        return decision && decision !== "accepted";
+      });
+
+      if (serverFilter === "review") {
+        return hasReview;
       }
 
-      const dashboardPayload = (await dashboardResponse.json()) as ChronostoryResponse;
-      const setupPayload = (await setupResponse.json()) as SetupStatus;
+      if (serverFilter === "all") {
+        return true;
+      }
 
-      setDashboard(dashboardPayload.state);
-      setBackend(dashboardPayload.backend);
-      setSetupStatus(setupPayload);
-      setLastSyncedAt(new Date().toISOString());
-      setErrorMessage("");
-      setReportForm((current) => ({
-        ...current,
-        serverName: current.serverName || dashboardPayload.state.servers[0]?.name || ""
-      }));
-      setRenameForm((current) => ({
-        serverName: current.serverName || dashboardPayload.state.servers[0]?.name || "",
-        nextServerName: current.nextServerName
-      }));
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "불러오기에 실패했습니다.");
-    } finally {
-      if (showLoader) setLoading(false);
+      return status === serverFilter;
+    });
+
+    return [...filtered].sort((left, right) => {
+      if (serverSort === "name") {
+        return left.name.localeCompare(right.name, "ko-KR", { numeric: true });
+      }
+
+      if (serverSort === "recent") {
+        return Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
+      }
+
+      return compareSoonness(left, right, dashboard, nowMs);
+    });
+  }, [dashboard, latestDecisionMap, nowMs, serverFilter, serverSort]);
+
+  const playAlertSound = useCallback(() => {
+    const context = audioContextRef.current;
+    if (!context) {
+      return;
     }
-  }
 
-  async function applyAction(action: ChronostoryAction) {
-    setSaving(true);
+    const startTime = context.currentTime;
+    for (const offset of [0, 0.18, 0.36]) {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+
+      oscillator.type = "sine";
+      oscillator.frequency.value = 880;
+
+      gain.gain.setValueAtTime(0.0001, startTime + offset);
+      gain.gain.exponentialRampToValueAtTime(0.16, startTime + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + offset + 0.14);
+
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(startTime + offset);
+      oscillator.stop(startTime + offset + 0.16);
+    }
+  }, []);
+
+  const stopTitleFlash = useCallback(() => {
+    if (titleFlashIntervalRef.current !== null) {
+      window.clearInterval(titleFlashIntervalRef.current);
+      titleFlashIntervalRef.current = null;
+    }
+
+    if (titleFlashTimeoutRef.current !== null) {
+      window.clearTimeout(titleFlashTimeoutRef.current);
+      titleFlashTimeoutRef.current = null;
+    }
+
+    if (typeof document !== "undefined") {
+      document.title = titleDefaultRef.current;
+    }
+  }, []);
+
+  const startTitleFlash = useCallback(
+    (message: string) => {
+      stopTitleFlash();
+
+      let blink = false;
+      titleFlashIntervalRef.current = window.setInterval(() => {
+        document.title = blink ? titleDefaultRef.current : message;
+        blink = !blink;
+      }, FLASH_INTERVAL_MS);
+
+      titleFlashTimeoutRef.current = window.setTimeout(() => {
+        stopTitleFlash();
+      }, FLASH_DURATION_MS);
+    },
+    [stopTitleFlash]
+  );
+
+  useEffect(() => {
+    void refreshDashboard();
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      titleDefaultRef.current = document.title || titleDefaultRef.current;
+    }
+
+    const clearOnFocus = () => {
+      stopTitleFlash();
+    };
+
+    window.addEventListener("focus", clearOnFocus);
+    document.addEventListener("visibilitychange", clearOnFocus);
+
+    return () => {
+      window.removeEventListener("focus", clearOnFocus);
+      document.removeEventListener("visibilitychange", clearOnFocus);
+      stopTitleFlash();
+    };
+  }, [stopTitleFlash]);
+
+  useEffect(() => {
+    const unlockAudio = () => {
+      if (typeof window === "undefined") {
+        return;
+      }
+
+      if (!audioContextRef.current) {
+        const AudioContextCtor =
+          window.AudioContext ??
+          (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (AudioContextCtor) {
+          audioContextRef.current = new AudioContextCtor();
+        }
+      }
+
+      void audioContextRef.current?.resume();
+    };
+
+    window.addEventListener("pointerdown", unlockAudio);
+    window.addEventListener("keydown", unlockAudio);
+
+    return () => {
+      window.removeEventListener("pointerdown", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      setNotificationPermission(window.Notification.permission);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!dashboard) {
+      return;
+    }
+
+    setRespawnDrafts(
+      Object.fromEntries(
+        dashboard.bossDefinitions.map((boss) => [
+          boss.id,
+          String(dashboard.bossSettings[boss.id]?.respawnMinutes ?? 180)
+        ])
+      )
+    );
+
+    if (!reportBossId || !dashboard.bossDefinitions.some((boss) => boss.id === reportBossId)) {
+      setReportBossId(dashboard.bossDefinitions[0]?.id ?? "");
+    }
+
+    if (!renameSource || !dashboard.servers.some((server) => server.name === renameSource)) {
+      const firstServer = dashboard.servers[0]?.name ?? "";
+      setRenameSource(firstServer);
+      setRenameTarget(firstServer);
+    }
+
+    if (!reportServerName && dashboard.servers[0]?.name) {
+      setReportServerName(dashboard.servers[0].name);
+    }
+  }, [dashboard, renameSource, reportBossId, reportServerName]);
+
+  useEffect(() => {
+    if (!dashboard) {
+      return;
+    }
+
+    const nextMap = new Map<string, boolean>();
+    const newlyReady: Array<{ server: ServerTimer; boss: BossDefinition }> = [];
+
+    for (const server of dashboard.servers) {
+      for (const boss of dashboard.bossDefinitions) {
+        const timer = server.bosses[boss.id];
+        const key = `${server.id}:${boss.id}`;
+        const isReady = getBossUrgency(timer?.nextRespawnAt ?? null, nowMs) === "ready";
+        nextMap.set(key, isReady);
+
+        if (readyStateInitializedRef.current && isReady && !readyStateRef.current.get(key)) {
+          newlyReady.push({ server, boss });
+        }
+      }
+    }
+
+    readyStateRef.current = nextMap;
+
+    if (!readyStateInitializedRef.current) {
+      readyStateInitializedRef.current = true;
+      return;
+    }
+
+    for (const item of newlyReady) {
+      playAlertSound();
+      startTitleFlash(`${item.server.name} ${item.boss.name} 리스폰 가능`);
+
+      if (
+        typeof window !== "undefined" &&
+        "Notification" in window &&
+        window.Notification.permission === "granted"
+      ) {
+        new window.Notification("보스 리스폰 알림", {
+          body: `${item.server.name} 서버의 ${item.boss.name}가 리스폰 가능한 상태입니다.`
+        });
+      }
+    }
+  }, [dashboard, nowMs, playAlertSound, startTitleFlash]);
+
+  async function refreshDashboard() {
     setErrorMessage("");
 
     try {
-      const response = await fetch("/api/chronostory", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(action)
-      });
+      const [dashboardResponse, setupResponse] = await Promise.all([
+        fetchJson<ChronostoryResponse>("/api/chronostory"),
+        fetchJson<SetupStatus>("/api/chronostory/setup")
+      ]);
 
-      const payload = (await response.json()) as ChronostoryResponse | { error?: string };
-      if (!response.ok || !("state" in payload)) {
-        throw new Error("error" in payload && payload.error ? payload.error : "요청 처리에 실패했습니다.");
-      }
-
-      setDashboard(payload.state);
-      setBackend(payload.backend);
+      setDashboard(dashboardResponse.state);
+      setBackend(dashboardResponse.backend);
+      setSetup(setupResponse);
       setLastSyncedAt(new Date().toISOString());
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "요청 처리에 실패했습니다.");
-      throw error;
-    } finally {
-      setSaving(false);
+      setErrorMessage(toErrorMessage(error, "대시보드를 불러오지 못했습니다."));
     }
   }
 
-  const summary = getDashboardSummary(dashboard, now);
-  const reviewSummary = getReviewSummary(dashboard.events);
-  const recentServerNames = Array.from(new Set(dashboard.events.map((event) => event.serverName))).slice(0, 6);
-  const filteredEvents = dashboard.events.filter((event) => {
-    const normalizedQuery = logQuery.trim().toLowerCase();
-    return (
-      (logDecisionFilter === "all" || event.decision === logDecisionFilter) &&
-      (logBossFilter === "all" || event.bossId === logBossFilter) &&
-      (!normalizedQuery ||
-        event.serverName.toLowerCase().includes(normalizedQuery) ||
-        BOSS_METADATA[event.bossId].name.toLowerCase().includes(normalizedQuery) ||
-        event.reporter.toLowerCase().includes(normalizedQuery) ||
-        event.note.toLowerCase().includes(normalizedQuery))
-    );
-  });
-  const sortedServers = [...dashboard.servers].sort((left, right) =>
-    compareServers(left, right, now, serverSortMode)
-  );
-  const visibleServers = sortedServers.filter((server) =>
-    matchesServerVisibility(server, dashboard, now, serverVisibilityFilter)
-  );
-  const soonestServerName =
-    visibleServers
-      .filter((server) => Number.isFinite(getNearestRespawnMs(server, now)))
-      .sort((left, right) => getNearestRespawnMs(left, now) - getNearestRespawnMs(right, now))[0]?.name ?? null;
-  const latestServerName =
-    [...visibleServers].sort((left, right) => getLatestSeenMs(right) - getLatestSeenMs(left))[0]?.name ?? null;
+  async function submitAction(action: ChronostoryAction) {
+    setIsBusy(true);
+    setErrorMessage("");
 
-  function handleToggleServerCollapse(serverName: string) {
-    setCollapsedServers((current) =>
-      current.includes(serverName)
-        ? current.filter((name) => name !== serverName)
-        : [...current, serverName]
-    );
+    try {
+      const response = await fetchJson<ChronostoryResponse>("/api/chronostory", {
+        method: "POST",
+        body: JSON.stringify(action)
+      });
+
+      setDashboard(response.state);
+      setBackend(response.backend);
+      setLastSyncedAt(new Date().toISOString());
+    } catch (error) {
+      setErrorMessage(toErrorMessage(error, "요청 처리 중 문제가 발생했습니다."));
+    } finally {
+      setIsBusy(false);
+    }
   }
 
-  function handleCollapseAllVisible() {
-    setCollapsedServers((current) => Array.from(new Set([...current, ...visibleServers.map((server) => server.name)])));
+  function adjustReportedAt(mode: "now" | "delta", minutes: number) {
+    if (mode === "now") {
+      setReportedAtInput(toLocalInputValue());
+      return;
+    }
+
+    const baseIso = fromLocalInputValue(reportedAtInput);
+    const baseDate = baseIso ? new Date(baseIso) : new Date();
+    const nextDate = new Date(baseDate.getTime() + minutes * 60_000);
+    setReportedAtInput(toLocalInputValue(nextDate));
   }
 
-  function handleExpandAllVisible() {
-    setCollapsedServers((current) =>
-      current.filter((serverName) => !visibleServers.some((server) => server.name === serverName))
-    );
-  }
-
-  async function handleAddServer(event: React.FormEvent<HTMLFormElement>) {
+  async function handleRegisterServer(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const nextName = serverDraft.trim();
-    if (!nextName) return;
-    await applyAction({ type: "register-server", serverName: nextName });
-    setServerDraft("");
+    if (!serverNameInput.trim()) {
+      setErrorMessage("서버 이름을 입력해 주세요.");
+      return;
+    }
+
+    const normalizedName = serverNameInput.trim();
+    await submitAction({ type: "register-server", serverName: normalizedName });
+    setServerNameInput("");
+    setReportServerName(normalizedName);
   }
 
   async function handleRenameServer(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const serverName = renameForm.serverName.trim();
-    const nextServerName = renameForm.nextServerName.trim();
-    if (!serverName || !nextServerName) return;
+    if (!renameSource.trim() || !renameTarget.trim()) {
+      setErrorMessage("변경할 서버와 새 이름을 입력해 주세요.");
+      return;
+    }
 
-    await applyAction({ type: "rename-server", serverName, nextServerName });
-    setRenameForm({ serverName: nextServerName, nextServerName: "" });
-    setReportForm((current) =>
-      current.serverName === serverName ? { ...current, serverName: nextServerName } : current
-    );
+    await submitAction({
+      type: "rename-server",
+      serverName: renameSource,
+      nextServerName: renameTarget
+    });
+
+    setReportServerName((current) => (current === renameSource ? renameTarget : current));
+    setRenameSource(renameTarget);
   }
 
   async function handleRemoveServer(serverName: string) {
-    await applyAction({ type: "remove-server", serverName });
-    setReportForm((current) => (current.serverName === serverName ? { ...current, serverName: "" } : current));
+    if (!window.confirm(`"${serverName}" 서버를 삭제할까요?`)) {
+      return;
+    }
+
+    await submitAction({ type: "remove-server", serverName });
   }
 
-  async function handleReportSubmit(event: React.FormEvent<HTMLFormElement>) {
+  async function handleReportKill(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const occurredAt = fromLocalInputValue(reportForm.occurredAt);
-    if (!reportForm.serverName.trim() || !occurredAt) return;
+    const normalizedServerName = reportServerName.trim();
+    const normalizedBossId = reportBossId.trim();
+    const reportedAtIso = fromLocalInputValue(reportedAtInput);
 
-    await applyAction({
+    if (!normalizedServerName || !normalizedBossId || !reportedAtIso) {
+      setErrorMessage("서버, 보스, 처치 시각을 모두 확인해 주세요.");
+      return;
+    }
+
+    await submitAction({
       type: "report-kill",
-      serverName: reportForm.serverName.trim(),
-      bossId: reportForm.bossId,
-      reportedAt: occurredAt,
-      reporter: reportForm.reporter.trim(),
-      note: reportForm.note.trim()
+      serverName: normalizedServerName,
+      bossId: normalizedBossId,
+      reportedAt: reportedAtIso,
+      reporter: reporter.trim(),
+      note: reportNote.trim()
     });
 
-    setReportForm((current) => ({
-      ...current,
-      occurredAt: toLocalInputValue(),
-      note: ""
-    }));
+    setReportServerName(normalizedServerName);
+    setReportNote("");
   }
 
-  function handleSetOccurredAt(minutesAgo: number) {
-    setReportForm((current) => ({
-      ...current,
-      occurredAt: toLocalInputValue(new Date(Date.now() - minutesAgo * 60_000))
-    }));
+  async function handleAddBoss(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const normalizedName = bossNameInput.trim();
+    const minutes = parseMinuteDraft(bossRespawnInput);
+
+    if (!normalizedName) {
+      setErrorMessage("보스 이름을 입력해 주세요.");
+      return;
+    }
+
+    if (minutes === null) {
+      setErrorMessage("리스폰 주기는 1분 이상 숫자로 입력해 주세요.");
+      return;
+    }
+
+    await submitAction({
+      type: "add-boss",
+      bossName: normalizedName,
+      respawnMinutes: minutes
+    });
+
+    setBossNameInput("");
+    setBossRespawnInput("180");
   }
 
-  async function handleQuickReset(serverName: string, bossId: BossId) {
-    await applyAction({
-      type: "report-kill",
-      serverName,
+  async function commitRespawnDraft(bossId: BossId) {
+    const minutes = parseMinuteDraft(respawnDrafts[bossId] ?? "");
+    if (minutes === null) {
+      setRespawnDrafts((current) => ({
+        ...current,
+        [bossId]: String(dashboard?.bossSettings[bossId]?.respawnMinutes ?? 180)
+      }));
+      return;
+    }
+
+    await submitAction({
+      type: "update-boss-setting",
       bossId,
-      reportedAt: new Date().toISOString(),
-      reporter: reportForm.reporter || "빠른 입력",
-      note: "카드에서 즉시 초기화"
+      respawnMinutes: minutes
     });
+  }
+
+  async function requestBrowserNotificationPermission() {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      return;
+    }
+
+    const permission = await window.Notification.requestPermission();
+    setNotificationPermission(permission);
   }
 
   return (
@@ -496,180 +647,562 @@ export default function HomePage() {
           <p className={styles.eyebrow}>Manual Input Mode</p>
           <h1>크로노스토리 수동 입력 타이머</h1>
           <p className={styles.description}>
-            보스 처치 시간을 유저가 직접 입력하고, 최근 제보를 검토하면서 서버별 리스폰 타이머를 함께 보는
-            대시보드입니다.
+            보스 처치 시간을 유저가 직접 입력하고, 여러 사람이 함께 서버별 리스폰 타이머를 보는
+            공유 대시보드입니다.
           </p>
+
           <div className={styles.callout}>
             <strong>현재 상태</strong>
-            <span>자동 연동 없음 / {backend === "supabase" ? "원격 저장소 사용 가능" : "로컬 저장소 사용 중"}</span>
-          </div>
-          <div className={styles.syncRow}>
-            <span className={styles.inlineBadge}>{loading ? "불러오는 중" : "수동 입력 대시보드"}</span>
-            <span className={styles.syncMeta}>
-              {lastSyncedAt ? `마지막 동기화 ${formatLocalTimestamp(lastSyncedAt)}` : "첫 동기화 대기 중"}
+            <span>
+              자동 연동 없이 수동 입력으로 운영 중이며, 원격 저장소를 통해 여러 기기에서 같은 값을 볼 수
+              있습니다.
             </span>
-            {saving ? <span className={styles.syncMeta}>저장 중</span> : null}
-            <button className={styles.ghostButton} type="button" onClick={() => void refreshDashboard(true)} disabled={loading || saving}>새로고침</button>
-            <button className={styles.primaryButton} type="button" onClick={() => void applyAction({ type: "seed-demo" })} disabled={saving}>샘플 데이터 넣기</button>
-            <button className={styles.ghostButton} type="button" onClick={() => void applyAction({ type: "reset-dashboard" })} disabled={saving}>전체 초기화</button>
           </div>
-          {errorMessage ? <p className={styles.errorBanner}>{errorMessage}</p> : null}
+
+          <div className={styles.syncRow}>
+            <span className={styles.inlineBadge}>수동 입력 대시보드</span>
+            <span className={styles.syncMeta}>
+              마지막 동기화 {lastSyncedAt ? formatLocalTimestamp(lastSyncedAt) : "없음"}
+            </span>
+            <button className={styles.ghostButton} type="button" onClick={() => void refreshDashboard()}>
+              새로고침
+            </button>
+          </div>
+
+          <div className={styles.heroActions}>
+            <button
+              className={styles.primaryButton}
+              type="button"
+              disabled={isBusy}
+              onClick={() => void submitAction({ type: "seed-demo" })}
+            >
+              샘플 데이터 넣기
+            </button>
+            <button
+              className={styles.ghostButton}
+              type="button"
+              disabled={isBusy}
+              onClick={() => void submitAction({ type: "reset-dashboard" })}
+            >
+              전체 초기화
+            </button>
+            <button
+              className={styles.ghostButton}
+              type="button"
+              disabled={isBusy}
+              onClick={() => void submitAction({ type: "remove-archived", nowMs })}
+            >
+              보관 서버 정리
+            </button>
+          </div>
+
+          {errorMessage ? <div className={styles.errorBanner}>{errorMessage}</div> : null}
+
           <div className={styles.featureGrid}>
-            <article className={styles.featureCard}><span>활성 서버</span><strong>{summary.activeServers}</strong><p>최근 입력이 들어온 서버 수입니다.</p></article>
-            <article className={styles.featureCard}><span>확정 입력</span><strong>{reviewSummary.accepted}</strong><p>최근 로그 중 정상 반영된 입력 수입니다.</p></article>
-            <article className={styles.featureCard}><span>검토 필요</span><strong>{reviewSummary.flagged}</strong><p>중복 제보나 오래된 제보로 분류된 입력 수입니다.</p></article>
+            <article className={styles.featureCard}>
+              <span>활성 서버</span>
+              <strong>{summary?.activeServers ?? 0}</strong>
+              <p>최근 입력이 들어온 서버 수입니다.</p>
+            </article>
+            <article className={styles.featureCard}>
+              <span>확정 입력</span>
+              <strong>
+                {dashboard?.events.filter((event) => event.decision === "accepted").length ?? 0}
+              </strong>
+              <p>정상 반영된 최근 입력 수입니다.</p>
+            </article>
+            <article className={styles.featureCard}>
+              <span>검토 필요</span>
+              <strong>
+                {dashboard?.events.filter((event) => event.decision !== "accepted").length ?? 0}
+              </strong>
+              <p>중복 또는 오래된 입력으로 분류된 수입니다.</p>
+            </article>
           </div>
         </div>
 
-        <div className={styles.sidePanel}>
+        <aside className={styles.sidePanel}>
           <div className={styles.panelBlock}>
-            <div className={styles.sectionHeader}>
-              <div><p className={styles.eyebrow}>Storage</p><h2>저장 상태</h2></div>
-            </div>
+            <p className={styles.eyebrow}>Storage</p>
             <div className={styles.statusStack}>
-              <div className={styles.statusLine}><span>현재 저장 방식</span><strong>{setupStatus?.backend === "supabase" ? "Supabase" : "로컬 파일"}</strong></div>
-              <div className={styles.statusLine}><span>원격 저장 준비</span><strong>{setupStatus?.supabaseReady ? "완료" : "미완료"}</strong></div>
+              <div className={styles.statusLine}>
+                <span>현재 저장 방식</span>
+                <strong>{backend === "supabase" ? "Supabase" : "로컬 파일"}</strong>
+              </div>
+              <div className={styles.statusLine}>
+                <span>원격 저장 준비</span>
+                <strong>{setup?.supabaseReady ? "완료" : "미완료"}</strong>
+              </div>
             </div>
-            {!setupStatus?.supabaseReady ? <div className={styles.setupCard}><strong>필수 환경변수</strong><p>{setupStatus?.missingServerVars.join(", ") || "SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY"}</p><span>지금은 없어도 수동 입력 기능은 정상적으로 사용할 수 있습니다.</span></div> : null}
           </div>
 
           <div className={styles.panelBlock}>
-            <div className={styles.sectionHeader}>
-              <div><p className={styles.eyebrow}>Boss Settings</p><h2>리스폰 주기</h2></div>
+            <p className={styles.eyebrow}>Alerts</p>
+            <div className={styles.setupCard}>
+              <strong>완료 알림</strong>
+              <p>타이머가 끝나면 알림음을 재생하고 브라우저 제목을 깜빡이게 했습니다.</p>
+              <span>
+                브라우저 알림 권한:{" "}
+                {notificationPermission === "granted"
+                  ? "허용"
+                  : notificationPermission === "denied"
+                    ? "차단"
+                    : "미설정"}
+              </span>
             </div>
+            {notificationPermission !== "granted" ? (
+              <button
+                className={styles.ghostButton}
+                type="button"
+                onClick={() => void requestBrowserNotificationPermission()}
+              >
+                브라우저 알림 허용
+              </button>
+            ) : null}
+          </div>
+
+          <div className={styles.panelBlock}>
+            <p className={styles.eyebrow}>Boss Registry</p>
             <div className={styles.settingList}>
-              {BOSS_IDS.map((bossId) => (
-                <label key={bossId} className={styles.settingRow}>
-                  <span>{BOSS_METADATA[bossId].name}</span>
-                  <input type="number" min={1} max={1440} value={dashboard.bossSettings[bossId].respawnMinutes} onChange={(event) => {
-                    const value = Number.parseInt(event.target.value, 10);
-                    if (Number.isFinite(value)) {
-                      void applyAction({ type: "update-boss-setting", bossId, respawnMinutes: value });
+              {bossDefinitions.map((boss) => (
+                <div className={styles.settingRow} key={boss.id}>
+                  <span>{boss.name}</span>
+                  <input
+                    inputMode="numeric"
+                    value={respawnDrafts[boss.id] ?? ""}
+                    onChange={(event) =>
+                      setRespawnDrafts((current) => ({
+                        ...current,
+                        [boss.id]: event.target.value.replace(/[^\d]/g, "").slice(0, 4)
+                      }))
                     }
-                  }} />
-                  <small>분</small>
-                </label>
+                    onBlur={() => void commitRespawnDraft(boss.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void commitRespawnDraft(boss.id);
+                      }
+                    }}
+                  />
+                  <button
+                    className={styles.ghostButton}
+                    type="button"
+                    onClick={() => void commitRespawnDraft(boss.id)}
+                  >
+                    저장
+                  </button>
+                </div>
               ))}
             </div>
+
+            <form className={styles.formStack} onSubmit={handleAddBoss}>
+              <div className={styles.twoColumnFields}>
+                <label className={styles.field}>
+                  <span>보스 이름</span>
+                  <input
+                    value={bossNameInput}
+                    onChange={(event) => setBossNameInput(event.target.value)}
+                    placeholder="예: 혼테일"
+                  />
+                </label>
+                <label className={styles.field}>
+                  <span>리스폰 주기(분)</span>
+                  <input
+                    inputMode="numeric"
+                    value={bossRespawnInput}
+                    onChange={(event) =>
+                      setBossRespawnInput(event.target.value.replace(/[^\d]/g, "").slice(0, 4))
+                    }
+                    placeholder="180"
+                  />
+                </label>
+              </div>
+              <button className={styles.primaryButton} type="submit" disabled={isBusy}>
+                보스 추가
+              </button>
+            </form>
           </div>
-        </div>
+        </aside>
       </section>
 
       <section className={styles.workspace}>
         <div className={styles.formColumn}>
-          <article className={styles.panelCard}>
+          <section className={styles.panelCard}>
             <div className={styles.sectionHeader}>
-              <div><p className={styles.eyebrow}>Server Registry</p><h2>서버 관리</h2></div>
-            </div>
-            <form className={styles.formStack} onSubmit={(event) => void handleAddServer(event)}>
-              <label className={styles.field}><span>새 서버 이름</span><input type="text" value={serverDraft} placeholder="예: 크로노 1" onChange={(event) => setServerDraft(event.target.value)} /></label>
-              <button className={styles.primaryButton} type="submit" disabled={saving}>서버 등록</button>
-            </form>
-            <form className={styles.formStack} onSubmit={(event) => void handleRenameServer(event)}>
-              <label className={styles.field}><span>이름 변경할 서버</span><select value={renameForm.serverName} onChange={(event) => setRenameForm((current) => ({ ...current, serverName: event.target.value }))}><option value="">서버 선택</option>{dashboard.servers.map((server) => <option key={server.id} value={server.name}>{server.name}</option>)}</select></label>
-              <label className={styles.field}><span>새 이름</span><input type="text" value={renameForm.nextServerName} placeholder="예: 크로노 1-1" onChange={(event) => setRenameForm((current) => ({ ...current, nextServerName: event.target.value }))} /></label>
-              <button className={styles.ghostButton} type="submit" disabled={saving || dashboard.servers.length === 0}>서버 이름 변경</button>
-            </form>
-          </article>
-
-          <article className={styles.panelCard}>
-            <div className={styles.sectionHeader}>
-              <div><p className={styles.eyebrow}>Manual Report</p><h2>보스 처치 입력</h2></div>
-            </div>
-            <div className={styles.quickSelectGroup}>
-              <span className={styles.quickSelectLabel}>입력자 프리셋</span>
-              <div className={styles.quickChipRow}>
-                {REPORTER_PRESETS.map((reporter) => <button key={reporter} className={styles.quickChip} type="button" onClick={() => setReportForm((current) => ({ ...current, reporter }))}>{reporter}</button>)}
+              <div>
+                <p className={styles.eyebrow}>Server Registry</p>
+                <h2>서버 관리</h2>
               </div>
             </div>
-            <form className={styles.formStack} onSubmit={(event) => void handleReportSubmit(event)}>
-              {recentServerNames.length > 0 ? <div className={styles.quickSelectGroup}><span className={styles.quickSelectLabel}>최근 서버</span><div className={styles.quickChipRow}>{recentServerNames.map((serverName) => <button key={serverName} className={styles.quickChip} type="button" onClick={() => setReportForm((current) => ({ ...current, serverName }))}>{serverName}</button>)}</div></div> : null}
+
+            <form className={styles.formStack} onSubmit={handleRegisterServer}>
               <label className={styles.field}>
-                <span>서버</span>
-                <input list="server-options" value={reportForm.serverName} onChange={(event) => setReportForm((current) => ({ ...current, serverName: event.target.value }))} placeholder="없는 서버 이름이면 자동 생성" />
-                <datalist id="server-options">{dashboard.servers.map((server) => <option key={server.id} value={server.name} />)}</datalist>
+                <span>새 서버 이름</span>
+                <input
+                  value={serverNameInput}
+                  onChange={(event) => setServerNameInput(event.target.value)}
+                  placeholder="예: 크로노 1"
+                />
               </label>
+              <button className={styles.primaryButton} type="submit" disabled={isBusy}>
+                서버 등록
+              </button>
+            </form>
+
+            <form className={styles.formStack} onSubmit={handleRenameServer}>
               <div className={styles.twoColumnFields}>
-                <label className={styles.field}><span>보스</span><select value={reportForm.bossId} onChange={(event) => setReportForm((current) => ({ ...current, bossId: event.target.value as BossId }))}>{BOSS_IDS.map((bossId) => <option key={bossId} value={bossId}>{BOSS_METADATA[bossId].name}</option>)}</select></label>
                 <label className={styles.field}>
-                  <span>처치 시각</span>
-                  <input type="datetime-local" value={reportForm.occurredAt} onChange={(event) => setReportForm((current) => ({ ...current, occurredAt: event.target.value }))} />
-                  <div className={styles.timeShortcutRow}>{[0, 5, 10, 30].map((minutesAgo) => <button key={minutesAgo} className={styles.timeShortcutButton} type="button" onClick={() => handleSetOccurredAt(minutesAgo)}>{minutesAgo === 0 ? "지금" : `${minutesAgo}분 전`}</button>)}</div>
+                  <span>이름 변경할 서버</span>
+                  <select value={renameSource} onChange={(event) => setRenameSource(event.target.value)}>
+                    {dashboard?.servers.map((server) => (
+                      <option key={server.id} value={server.name}>
+                        {server.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className={styles.field}>
+                  <span>새 이름</span>
+                  <input
+                    value={renameTarget}
+                    onChange={(event) => setRenameTarget(event.target.value)}
+                    placeholder="변경할 이름"
+                  />
                 </label>
               </div>
-              <div className={styles.twoColumnFields}>
-                <label className={styles.field}><span>입력자</span><input type="text" value={reportForm.reporter} placeholder="닉네임 또는 운영자" onChange={(event) => setReportForm((current) => ({ ...current, reporter: event.target.value }))} /></label>
-                <label className={styles.field}><span>메모</span><input type="text" value={reportForm.note} placeholder="예: 2채널, 파티 확인" onChange={(event) => setReportForm((current) => ({ ...current, note: event.target.value }))} /></label>
-              </div>
-              <button className={styles.primaryButton} type="submit" disabled={saving}>타이머 반영</button>
+              <button className={styles.ghostButton} type="submit" disabled={isBusy || !renameSource}>
+                서버 이름 변경
+              </button>
             </form>
-          </article>
-        </div>
 
-        <div className={styles.feedColumn}>
-          <article className={styles.panelCard}>
-            <div className={styles.sectionHeader}>
-              <div><p className={styles.eyebrow}>Live Feed</p><h2>최근 제보 로그</h2></div>
-            </div>
-            <div className={styles.logFilters}>
-              <input className={styles.logSearch} type="text" value={logQuery} placeholder="서버명, 보스명, 입력자, 메모 검색" onChange={(event) => setLogQuery(event.target.value)} />
-              <div className={styles.logFilterRow}>
-                <select value={logDecisionFilter} onChange={(event) => setLogDecisionFilter(event.target.value as LogDecisionFilter)}>
-                  <option value="all">전체 판정</option>
-                  <option value="accepted">확정 입력</option>
-                  <option value="duplicate">중복 제보</option>
-                  <option value="ignored_old">오래된 제보</option>
-                </select>
-                <select value={logBossFilter} onChange={(event) => setLogBossFilter(event.target.value as "all" | BossId)}>
-                  <option value="all">전체 보스</option>
-                  {BOSS_IDS.map((bossId) => <option key={bossId} value={bossId}>{BOSS_METADATA[bossId].name}</option>)}
-                </select>
-              </div>
-            </div>
-            <div className={styles.logList}>
-              {filteredEvents.length === 0 ? <div className={styles.emptyCard}><strong>표시할 로그가 없습니다.</strong><span>검색어나 필터를 바꾸거나 새 입력을 추가해 보세요.</span></div> : filteredEvents.slice(0, 12).map((event) => (
-                <article key={event.id} className={`${styles.logCard} ${styles[`logCard_${event.decision}`]}`}>
-                  <div className={styles.logHeader}>
-                    <strong>{event.serverName} / {BOSS_METADATA[event.bossId].name}</strong>
-                    <span className={`${styles.inlineBadge} ${styles[`decisionBadge_${event.decision}`]}`}>{DECISION_COPY[event.decision]}</span>
-                  </div>
-                  <p>{formatLocalTimestamp(event.reportedAt)} / {event.reporter || "익명"}</p>
-                  <span>{event.note || "메모 없음"}</span>
-                </article>
+            <div className={styles.serverList}>
+              {dashboard?.servers.map((server) => (
+                <div className={styles.serverListItem} key={server.id}>
+                  <strong>{server.name}</strong>
+                  <button
+                    className={styles.dangerButton}
+                    type="button"
+                    onClick={() => void handleRemoveServer(server.name)}
+                  >
+                    삭제
+                  </button>
+                </div>
               ))}
             </div>
-          </article>
-        </div>
-      </section>
+          </section>
 
-      <section className={styles.serverArea}>
-        <div className={styles.serverHeader}>
-          <div><p className={styles.eyebrow}>Manual Timer Board</p><h2>서버별 타이머</h2></div>
-          <div className={styles.serverHeaderTools}>
-            <span className={styles.inlineMeta}>활성 {sortedServers.filter((server) => getServerStatus(server, dashboard.serviceSettings, now) === "active").length} / 유예 {sortedServers.filter((server) => getServerStatus(server, dashboard.serviceSettings, now) === "stale").length} / 보관 {sortedServers.filter((server) => getServerStatus(server, dashboard.serviceSettings, now) === "archived").length}</span>
-            <div className={styles.filterControls}>
-              <button className={styles.ghostButton} type="button" onClick={handleCollapseAllVisible} disabled={saving || visibleServers.length === 0}>전체 접기</button>
-              <button className={styles.ghostButton} type="button" onClick={handleExpandAllVisible} disabled={saving || visibleServers.length === 0}>전체 펼치기</button>
-              <select className={styles.sortSelect} value={serverVisibilityFilter} onChange={(event) => setServerVisibilityFilter(event.target.value as ServerVisibilityFilter)}>
-                <option value="all">전체 서버</option>
-                <option value="active">활성 서버만</option>
-                <option value="stale">유예 서버만</option>
-                <option value="archived">보관 서버만</option>
-                <option value="flagged">검토 필요 서버만</option>
-              </select>
-              <select className={styles.sortSelect} value={serverSortMode} onChange={(event) => setServerSortMode(event.target.value as ServerSortMode)}>
-                <option value="respawn">리스폰 임박 순</option>
-                <option value="recent">최근 입력 순</option>
-                <option value="name">서버명 순</option>
-              </select>
+          <section className={styles.panelCard}>
+            <div className={styles.sectionHeader}>
+              <div>
+                <p className={styles.eyebrow}>Boss Reporting</p>
+                <h2>보스 처치 입력</h2>
+              </div>
             </div>
-          </div>
-        </div>
-        {visibleServers.length === 0 ? <div className={styles.emptyCard}><strong>현재 필터에 맞는 서버가 없습니다.</strong><span>필터를 바꾸거나 샘플 데이터를 넣어서 화면을 점검해 보세요.</span></div> : null}
-        <div className={styles.serverGrid}>
-          {visibleServers.map((server) => (
-            <ServerCard key={server.id} server={server} now={now} dashboard={dashboard} saving={saving} collapsed={collapsedServers.includes(server.name)} highlightLabels={[server.name === soonestServerName ? "가장 임박" : null, server.name === latestServerName ? "최근 입력" : null].filter((value): value is string => value !== null)} onToggleCollapse={handleToggleServerCollapse} onQuickReset={handleQuickReset} onHeartbeat={async (serverName) => applyAction({ type: "heartbeat", serverName })} onRemoveServer={handleRemoveServer} />
-          ))}
+
+            <form className={styles.formStack} onSubmit={handleReportKill}>
+              {recentServerNames.length > 0 ? (
+                <div className={styles.quickSelectGroup}>
+                  <span className={styles.quickSelectLabel}>최근 서버</span>
+                  <div className={styles.quickChipRow}>
+                    {recentServerNames.map((serverName) => (
+                      <button
+                        className={styles.quickChip}
+                        key={serverName}
+                        type="button"
+                        onClick={() => setReportServerName(serverName)}
+                      >
+                        {serverName}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className={styles.quickSelectGroup}>
+                <span className={styles.quickSelectLabel}>입력자 프리셋</span>
+                <div className={styles.quickChipRow}>
+                  {REPORTER_PRESETS.map((preset) => (
+                    <button
+                      className={styles.quickChip}
+                      key={preset}
+                      type="button"
+                      onClick={() => setReporter(preset)}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className={styles.twoColumnFields}>
+                <label className={styles.field}>
+                  <span>서버 이름</span>
+                  <input
+                    value={reportServerName}
+                    onChange={(event) => setReportServerName(event.target.value)}
+                    placeholder="예: 크로노 1"
+                  />
+                </label>
+                <label className={styles.field}>
+                  <span>보스</span>
+                  <select value={reportBossId} onChange={(event) => setReportBossId(event.target.value)}>
+                    {bossDefinitions.map((boss) => (
+                      <option key={boss.id} value={boss.id}>
+                        {boss.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className={styles.twoColumnFields}>
+                <label className={styles.field}>
+                  <span>입력자</span>
+                  <input value={reporter} onChange={(event) => setReporter(event.target.value)} />
+                </label>
+                <label className={styles.field}>
+                  <span>메모</span>
+                  <input
+                    value={reportNote}
+                    onChange={(event) => setReportNote(event.target.value)}
+                    placeholder="선택 입력"
+                  />
+                </label>
+              </div>
+
+              <label className={styles.field}>
+                <span>처치 시각</span>
+                <input
+                  type="datetime-local"
+                  value={reportedAtInput}
+                  onChange={(event) => setReportedAtInput(event.target.value)}
+                />
+              </label>
+
+              <div className={styles.timeShortcutRow}>
+                {TIME_ADJUSTMENTS.map((shortcut) => (
+                  <button
+                    className={styles.timeShortcutButton}
+                    key={shortcut.label}
+                    type="button"
+                    onClick={() => adjustReportedAt(shortcut.mode, shortcut.minutes)}
+                  >
+                    {shortcut.label}
+                  </button>
+                ))}
+              </div>
+
+              <button className={styles.primaryButton} type="submit" disabled={isBusy}>
+                타이머 반영
+              </button>
+            </form>
+          </section>
+
+          <section className={styles.serverArea}>
+            <div className={styles.sectionHeader}>
+              <div>
+                <p className={styles.eyebrow}>Server Timers</p>
+                <h2>서버별 타이머</h2>
+              </div>
+
+              <div className={styles.serverHeaderTools}>
+                <div className={styles.filterControls}>
+                  <select
+                    className={styles.sortSelect}
+                    value={serverFilter}
+                    onChange={(event) => setServerFilter(event.target.value as ServerFilter)}
+                  >
+                    <option value="all">전체 서버</option>
+                    <option value="active">활성 서버만</option>
+                    <option value="stale">유예 서버만</option>
+                    <option value="archived">보관 서버만</option>
+                    <option value="review">검토 필요 서버만</option>
+                  </select>
+                  <select
+                    className={styles.sortSelect}
+                    value={serverSort}
+                    onChange={(event) => setServerSort(event.target.value as ServerSort)}
+                  >
+                    <option value="soon">리스폰 임박 순</option>
+                    <option value="recent">최근 입력 순</option>
+                    <option value="name">서버명 순</option>
+                  </select>
+                </div>
+                <div className={styles.filterControls}>
+                  <button
+                    className={styles.ghostButton}
+                    type="button"
+                    onClick={() =>
+                      setCollapsedServers(
+                        Object.fromEntries((dashboard?.servers ?? []).map((server) => [server.id, true]))
+                      )
+                    }
+                  >
+                    전체 접기
+                  </button>
+                  <button
+                    className={styles.ghostButton}
+                    type="button"
+                    onClick={() => setCollapsedServers({})}
+                  >
+                    전체 펼치기
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {visibleServers.length > 0 ? (
+              <div className={styles.serverGrid}>
+                {visibleServers.map((server) => {
+                  const status = getServerStatus(server, dashboard!.serviceSettings, nowMs);
+                  const collapsed = collapsedServers[server.id] ?? false;
+                  const isMostRecent = dashboard?.servers[0]?.id === server.id;
+                  const hasReview = bossDefinitions.some((boss) => {
+                    const decision = latestDecisionMap.get(`${server.name}:${boss.id}`);
+                    return decision && decision !== "accepted";
+                  });
+
+                  return (
+                    <article
+                      className={`${styles.serverCard} ${hasReview ? styles.serverCardHighlighted : ""}`}
+                      key={server.id}
+                    >
+                      <div className={styles.serverHeader}>
+                        <div className={styles.serverTop}>
+                          <div className={styles.serverActions}>
+                            <span className={`${styles.statusBadge} ${styles[`status_${status}`]}`}>
+                              {getStatusLabel(status)}
+                            </span>
+                            {isMostRecent ? <span className={styles.priorityBadge}>최근 입력</span> : null}
+                            {hasReview ? <span className={styles.priorityBadge}>검토 필요</span> : null}
+                          </div>
+                          <h3>{server.name}</h3>
+                          <p>마지막 입력 {formatRelativeAge(server.lastSeenAt, nowMs)}</p>
+                        </div>
+
+                        <div className={styles.serverActions}>
+                          <button
+                            className={styles.ghostButton}
+                            type="button"
+                            onClick={() =>
+                              setCollapsedServers((current) => ({
+                                ...current,
+                                [server.id]: !collapsed
+                              }))
+                            }
+                          >
+                            {collapsed ? "펼치기" : "접기"}
+                          </button>
+                          <button
+                            className={styles.ghostButton}
+                            type="button"
+                            onClick={() => {
+                              setReportServerName(server.name);
+                              setReportedAtInput(toLocalInputValue());
+                            }}
+                          >
+                            지금 시각으로 초기화
+                          </button>
+                          <button
+                            className={styles.dangerButton}
+                            type="button"
+                            onClick={() => void handleRemoveServer(server.name)}
+                          >
+                            삭제
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className={`${styles.bossGrid} ${collapsed ? styles.bossGridCollapsed : ""}`}>
+                        {bossDefinitions.map((boss) => {
+                          const timer = server.bosses[boss.id];
+                          const urgency = getBossUrgency(timer?.nextRespawnAt ?? null, nowMs);
+                          const decision = latestDecisionMap.get(`${server.name}:${boss.id}`);
+
+                          return (
+                            <div
+                              className={`${styles.bossCard} ${
+                                urgency === "ready"
+                                  ? styles.bossCard_ready
+                                  : urgency === "soon"
+                                    ? styles.bossCard_soon
+                                    : ""
+                              }`}
+                              key={`${server.id}:${boss.id}`}
+                              style={{ ["--boss-accent" as string]: boss.accent }}
+                            >
+                              <div className={styles.bossHeader}>
+                                <div>
+                                  <p>Boss</p>
+                                  <h4>{boss.name}</h4>
+                                </div>
+                                <span>{dashboard?.bossSettings[boss.id]?.respawnMinutes ?? 0}분</span>
+                              </div>
+
+                              <div className={styles.bossStateRow}>
+                                <span className={`${styles.urgencyBadge} ${styles[`urgency_${urgency}`]}`}>
+                                  {getUrgencyLabel(urgency)}
+                                </span>
+                                {decision ? (
+                                  <span
+                                    className={`${styles.validationBadge} ${styles[`validation_${decision}`]}`}
+                                  >
+                                    {getDecisionLabel(decision)}
+                                  </span>
+                                ) : null}
+                              </div>
+
+                              <strong className={`${styles.timerValue} ${styles[`timer_${urgency}`]}`}>
+                                {getCountdownLabel(timer?.nextRespawnAt ?? null, nowMs)}
+                              </strong>
+
+                              <dl className={styles.metaGrid}>
+                                <div>
+                                  <dt>최근 처치</dt>
+                                  <dd>{formatLocalTimestamp(timer?.lastKillAt ?? null)}</dd>
+                                </div>
+                                <div>
+                                  <dt>다음 리스폰</dt>
+                                  <dd>{formatLocalTimestamp(timer?.nextRespawnAt ?? null)}</dd>
+                                </div>
+                                <div>
+                                  <dt>갱신자</dt>
+                                  <dd>{timer?.updatedBy || "없음"}</dd>
+                                </div>
+                                <div>
+                                  <dt>버전</dt>
+                                  <dd>{timer?.version ?? 0}</dd>
+                                </div>
+                              </dl>
+
+                              <p className={styles.noteLine}>{timer?.note || "메모 없음"}</p>
+
+                              <button
+                                className={styles.ghostButton}
+                                type="button"
+                                onClick={() => {
+                                  setReportServerName(server.name);
+                                  setReportBossId(boss.id);
+                                  setReportedAtInput(toLocalInputValue());
+                                }}
+                              >
+                                이 보스로 입력하기
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className={styles.emptyCard}>
+                <strong>표시할 서버가 없습니다.</strong>
+                <span>서버를 등록하거나 보스 처치 입력을 먼저 추가해 주세요.</span>
+              </div>
+            )}
+          </section>
         </div>
       </section>
     </main>
