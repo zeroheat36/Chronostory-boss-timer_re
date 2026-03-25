@@ -188,6 +188,9 @@ export default function HomePage() {
   const titleFlashIntervalRef = useRef<number | null>(null);
   const titleFlashTimeoutRef = useRef<number | null>(null);
   const titleDefaultRef = useRef("크로노스토리 수동 입력 타이머");
+  const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
+  const originalFaviconRef = useRef<string | null>(null);
+  const alertFaviconRef = useRef<string | null>(null);
   const readyStateRef = useRef<Map<string, boolean>>(new Map());
   const readyStateInitializedRef = useRef(false);
 
@@ -287,23 +290,113 @@ export default function HomePage() {
     }
 
     const startTime = context.currentTime;
-    for (const offset of [0, 0.18, 0.36]) {
+    for (const [index, offset] of [0, 0.22, 0.44, 0.66].entries()) {
       const oscillator = context.createOscillator();
       const gain = context.createGain();
 
-      oscillator.type = "sine";
-      oscillator.frequency.value = 880;
+      oscillator.type = index % 2 === 0 ? "square" : "sawtooth";
+      oscillator.frequency.value = index % 2 === 0 ? 988 : 740;
 
       gain.gain.setValueAtTime(0.0001, startTime + offset);
-      gain.gain.exponentialRampToValueAtTime(0.16, startTime + offset + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + offset + 0.14);
+      gain.gain.exponentialRampToValueAtTime(0.28, startTime + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + offset + 0.2);
 
       oscillator.connect(gain);
       gain.connect(context.destination);
       oscillator.start(startTime + offset);
-      oscillator.stop(startTime + offset + 0.16);
+      oscillator.stop(startTime + offset + 0.22);
     }
   }, []);
+
+  const speakRespawnAlert = useCallback(() => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance("Boss Respawn");
+    utterance.volume = 1;
+    utterance.rate = 0.92;
+    utterance.pitch = 1;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  const ensureFaviconLink = useCallback(() => {
+    if (typeof document === "undefined") {
+      return null;
+    }
+
+    if (!faviconLinkRef.current) {
+      const existing = document.querySelector("link[rel~='icon']") as HTMLLinkElement | null;
+      faviconLinkRef.current = existing ?? document.createElement("link");
+
+      if (!existing) {
+        faviconLinkRef.current.rel = "icon";
+        document.head.appendChild(faviconLinkRef.current);
+      }
+    }
+
+    if (originalFaviconRef.current === null) {
+      originalFaviconRef.current = faviconLinkRef.current.href || "";
+    }
+
+    return faviconLinkRef.current;
+  }, []);
+
+  const getAlertFavicon = useCallback(() => {
+    if (typeof document === "undefined") {
+      return "";
+    }
+
+    if (alertFaviconRef.current) {
+      return alertFaviconRef.current;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      return "";
+    }
+
+    context.fillStyle = "#9d4f2f";
+    context.beginPath();
+    context.arc(32, 32, 30, 0, Math.PI * 2);
+    context.fill();
+
+    context.fillStyle = "#fff6ea";
+    context.font = "bold 38px sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText("!", 32, 34);
+
+    alertFaviconRef.current = canvas.toDataURL("image/png");
+    return alertFaviconRef.current;
+  }, []);
+
+  const setAlertFavicon = useCallback(
+    (active: boolean) => {
+      const link = ensureFaviconLink();
+      if (!link) {
+        return;
+      }
+
+      if (active) {
+        const nextHref = getAlertFavicon();
+        if (nextHref) {
+          link.href = nextHref;
+        }
+        return;
+      }
+
+      if (originalFaviconRef.current !== null) {
+        link.href = originalFaviconRef.current;
+      }
+    },
+    [ensureFaviconLink, getAlertFavicon]
+  );
 
   const stopTitleFlash = useCallback(() => {
     if (titleFlashIntervalRef.current !== null) {
@@ -319,7 +412,8 @@ export default function HomePage() {
     if (typeof document !== "undefined") {
       document.title = titleDefaultRef.current;
     }
-  }, []);
+    setAlertFavicon(false);
+  }, [setAlertFavicon]);
 
   const startTitleFlash = useCallback(
     (message: string) => {
@@ -328,6 +422,7 @@ export default function HomePage() {
       let blink = false;
       titleFlashIntervalRef.current = window.setInterval(() => {
         document.title = blink ? titleDefaultRef.current : message;
+        setAlertFavicon(!blink);
         blink = !blink;
       }, FLASH_INTERVAL_MS);
 
@@ -335,7 +430,7 @@ export default function HomePage() {
         stopTitleFlash();
       }, FLASH_DURATION_MS);
     },
-    [stopTitleFlash]
+    [setAlertFavicon, stopTitleFlash]
   );
 
   useEffect(() => {
@@ -356,6 +451,7 @@ export default function HomePage() {
     if (typeof document !== "undefined") {
       titleDefaultRef.current = document.title || titleDefaultRef.current;
     }
+    ensureFaviconLink();
 
     const clearOnFocus = () => {
       stopTitleFlash();
@@ -369,7 +465,7 @@ export default function HomePage() {
       document.removeEventListener("visibilitychange", clearOnFocus);
       stopTitleFlash();
     };
-  }, [stopTitleFlash]);
+  }, [ensureFaviconLink, stopTitleFlash]);
 
   useEffect(() => {
     const unlockAudio = () => {
@@ -463,19 +559,20 @@ export default function HomePage() {
 
     for (const item of newlyReady) {
       playAlertSound();
-      startTitleFlash(`${item.server.name} ${item.boss.name} 리스폰 가능`);
+      speakRespawnAlert();
+      startTitleFlash(`Boss Respawn | ${item.server.name} | ${item.boss.name}`);
 
       if (
         typeof window !== "undefined" &&
         "Notification" in window &&
         window.Notification.permission === "granted"
       ) {
-        new window.Notification("보스 리스폰 알림", {
+        new window.Notification("Boss Respawn", {
           body: `${item.server.name} 서버의 ${item.boss.name}가 리스폰 가능한 상태입니다.`
         });
       }
     }
-  }, [dashboard, nowMs, playAlertSound, startTitleFlash]);
+  }, [dashboard, nowMs, playAlertSound, speakRespawnAlert, startTitleFlash]);
 
   async function refreshDashboard() {
     setErrorMessage("");
@@ -1061,10 +1158,15 @@ export default function HomePage() {
                     const decision = latestDecisionMap.get(`${server.name}:${boss.id}`);
                     return decision && decision !== "accepted";
                   });
+                  const hasReadyBoss = bossDefinitions.some(
+                    (boss) => getBossUrgency(server.bosses[boss.id]?.nextRespawnAt ?? null, nowMs) === "ready"
+                  );
 
                   return (
                     <article
-                      className={`${styles.serverCard} ${hasReview ? styles.serverCardHighlighted : ""}`}
+                      className={`${styles.serverCard} ${hasReview ? styles.serverCardHighlighted : ""} ${
+                        hasReadyBoss ? styles.serverCardReady : ""
+                      }`}
                       key={server.id}
                     >
                       <div className={styles.serverHeader}>
@@ -1073,6 +1175,11 @@ export default function HomePage() {
                             <span className={`${styles.statusBadge} ${styles[`status_${status}`]}`}>
                               {getStatusLabel(status)}
                             </span>
+                            {hasReadyBoss ? (
+                              <span className={`${styles.priorityBadge} ${styles.priorityBadgeReady}`}>
+                                리스폰 활성
+                              </span>
+                            ) : null}
                             {isMostRecent ? <span className={styles.priorityBadge}>최근 입력</span> : null}
                             {hasReview ? <span className={styles.priorityBadge}>검토 필요</span> : null}
                           </div>
