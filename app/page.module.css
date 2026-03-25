@@ -1,0 +1,782 @@
+.pageShell {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  width: min(1240px, 100%);
+  margin: 0 auto;
+  padding: 30px 20px 72px;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.9fr);
+  gap: 24px;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+}
+
+.heroCopy,
+.sidePanel,
+.panelCard,
+.serverCard {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+}
+
+.heroCopy {
+  padding: 34px;
+  background:
+    radial-gradient(circle at top left, rgba(61, 129, 144, 0.18), transparent 38%),
+    radial-gradient(circle at bottom right, rgba(195, 93, 41, 0.16), transparent 34%),
+    var(--panel);
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  font-size: 0.74rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--secondary);
+}
+
+.heroCopy h1,
+.sectionHeader h2,
+.serverHeader h2,
+.serverTop h3,
+.bossHeader h4 {
+  margin: 0;
+}
+
+.heroCopy h1 {
+  max-width: 12ch;
+  font-size: clamp(3rem, 8vw, 5.8rem);
+  line-height: 0.92;
+}
+
+.description {
+  max-width: 42rem;
+  margin: 20px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+  font-size: 1.04rem;
+}
+
+.callout,
+.featureCard,
+.panelBlock,
+.emptyCard,
+.logCard,
+.bossCard {
+  border: 1px solid rgba(56, 49, 40, 0.12);
+  background: rgba(255, 252, 246, 0.74);
+}
+
+.callout {
+  display: grid;
+  gap: 6px;
+  margin-top: 24px;
+  padding: 18px 20px;
+  border-radius: var(--radius-md);
+}
+
+.callout strong {
+  font-size: 0.95rem;
+}
+
+.callout span,
+.featureCard p,
+.helperText,
+.logCard p,
+.logCard span,
+.serverTop p,
+.metaGrid dd,
+.noteLine,
+.emptyCard span,
+.syncMeta {
+  color: var(--muted);
+}
+
+.syncRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 18px;
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.errorBanner {
+  margin: 14px 0 0;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(162, 48, 48, 0.18);
+  background: rgba(162, 48, 48, 0.08);
+  color: var(--danger);
+}
+
+.featureGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.featureCard {
+  padding: 18px;
+  border-radius: var(--radius-md);
+}
+
+.featureCard span {
+  display: block;
+  font-size: 0.88rem;
+}
+
+.featureCard strong {
+  display: block;
+  margin-top: 10px;
+  font-size: 2rem;
+}
+
+.featureCard p {
+  margin: 10px 0 0;
+  line-height: 1.55;
+  font-size: 0.94rem;
+}
+
+.sidePanel,
+.panelCard {
+  padding: 22px;
+}
+
+.sidePanel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panelBlock,
+.panelCard {
+  display: grid;
+  gap: 18px;
+}
+
+.panelBlock {
+  padding: 18px;
+  border-radius: var(--radius-md);
+}
+
+.sectionHeader,
+.serverTop,
+.serverHeader,
+.bossHeader,
+.logHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sectionHeader h2,
+.serverHeader h2 {
+  font-size: clamp(1.5rem, 3.2vw, 2rem);
+}
+
+.settingList,
+.formStack,
+.logList,
+.statusStack {
+  display: grid;
+  gap: 12px;
+}
+
+.serverList {
+  display: grid;
+  gap: 10px;
+}
+
+.serverListItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(56, 49, 40, 0.12);
+  border-radius: var(--radius-md);
+  background: rgba(255, 252, 246, 0.74);
+}
+
+.statusLine,
+.setupCard {
+  border: 1px solid rgba(56, 49, 40, 0.12);
+  background: rgba(255, 252, 246, 0.74);
+  border-radius: var(--radius-md);
+}
+
+.statusLine {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.statusLine span {
+  color: var(--muted);
+}
+
+.statusLine strong {
+  color: var(--text);
+}
+
+.setupCard {
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+}
+
+.setupCard p,
+.setupCard span,
+.setupCard strong {
+  margin: 0;
+}
+
+.setupCard p,
+.setupCard span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.settingRow,
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.settingRow {
+  grid-template-columns: minmax(0, 1fr) 90px auto;
+  align-items: center;
+}
+
+.field span,
+.settingRow span,
+.metaGrid dt {
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.field input,
+.field select,
+.settingRow input {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(56, 49, 40, 0.18);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+}
+
+.twoColumnFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.timeShortcutRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.timeShortcutButton {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid rgba(56, 49, 40, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text);
+}
+
+.primaryButton,
+.ghostButton,
+.dangerButton {
+  min-height: 48px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  transition:
+    transform 180ms ease,
+    opacity 180ms ease,
+    border-color 180ms ease,
+    background 180ms ease;
+}
+
+.primaryButton:hover,
+.ghostButton:hover,
+.dangerButton:hover {
+  transform: translateY(-1px);
+}
+
+.primaryButton {
+  border: 0;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+}
+
+.ghostButton {
+  border: 1px solid rgba(56, 49, 40, 0.14);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.dangerButton {
+  border: 1px solid rgba(163, 56, 45, 0.18);
+  color: var(--danger);
+  background: rgba(163, 56, 45, 0.08);
+}
+
+.ghostButton:disabled,
+.dangerButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.helperText {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.formColumn,
+.feedColumn {
+  display: grid;
+  gap: 24px;
+}
+
+.feedColumn {
+  display: none;
+}
+
+.quickSelectGroup {
+  display: grid;
+  gap: 8px;
+}
+
+.quickSelectLabel {
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.quickChipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quickChip {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid rgba(42, 125, 139, 0.16);
+  border-radius: 999px;
+  background: rgba(42, 125, 139, 0.08);
+  color: var(--secondary);
+}
+
+.logFilters {
+  display: grid;
+  gap: 10px;
+}
+
+.logSearch {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(56, 49, 40, 0.18);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+}
+
+.logFilterRow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.logFilterRow select {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(56, 49, 40, 0.18);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+}
+
+.logList {
+  min-height: 100%;
+}
+
+.logCard {
+  display: grid;
+  gap: 4px;
+  padding: 16px 18px;
+  border-radius: var(--radius-md);
+}
+
+.logCard_duplicate,
+.logCard_ignored_old {
+  border-color: rgba(177, 115, 53, 0.28);
+  background: rgba(255, 248, 236, 0.92);
+}
+
+.logCard_accepted {
+  border-color: rgba(42, 125, 139, 0.16);
+}
+
+.logCard p,
+.logCard span {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.inlineBadge,
+.statusBadge,
+.inlineMeta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+}
+
+.inlineBadge,
+.inlineMeta {
+  padding: 8px 12px;
+  background: rgba(42, 125, 139, 0.1);
+  color: var(--secondary);
+}
+
+.decisionBadge_accepted {
+  background: rgba(42, 125, 139, 0.1);
+  color: var(--secondary);
+}
+
+.decisionBadge_duplicate,
+.decisionBadge_ignored_old {
+  background: rgba(177, 115, 53, 0.16);
+  color: #8d4a19;
+}
+
+.serverArea {
+  display: grid;
+  gap: 18px;
+}
+
+.serverHeaderTools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.filterControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sortSelect {
+  min-height: 42px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 49, 40, 0.18);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+}
+
+.serverGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.serverCard {
+  padding: 22px;
+}
+
+.serverCardHighlighted {
+  border-color: rgba(42, 125, 139, 0.28);
+  box-shadow:
+    0 18px 36px rgba(42, 125, 139, 0.12),
+    var(--shadow);
+}
+
+.serverTop h3 {
+  font-size: 1.3rem;
+}
+
+.serverTop p {
+  margin: 8px 0 0;
+}
+
+.serverActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.priorityBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(42, 125, 139, 0.12);
+  color: var(--secondary);
+  font-weight: 700;
+}
+
+.statusBadge {
+  padding: 10px 14px;
+  color: #fff;
+}
+
+.status_active {
+  background: linear-gradient(135deg, #2a7d8b, #1d5e72);
+}
+
+.status_stale {
+  background: linear-gradient(135deg, #b17335, #8d4a19);
+}
+
+.bossGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.bossGridCollapsed {
+  display: none;
+}
+
+.bossCard {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-radius: var(--radius-md);
+  border-top: 4px solid var(--boss-accent);
+}
+
+.bossCard_ready {
+  background:
+    linear-gradient(180deg, rgba(195, 93, 41, 0.14), rgba(255, 252, 246, 0.74)),
+    rgba(255, 252, 246, 0.74);
+}
+
+.bossCard_soon {
+  background:
+    linear-gradient(180deg, rgba(177, 115, 53, 0.12), rgba(255, 252, 246, 0.74)),
+    rgba(255, 252, 246, 0.74);
+}
+
+.bossHeader p,
+.bossHeader span,
+.metaGrid dd,
+.metaGrid dt,
+.noteLine {
+  margin: 0;
+}
+
+.bossHeader p {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.bossHeader span {
+  color: var(--boss-accent);
+  font-weight: 700;
+}
+
+.bossStateRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
+.urgencyBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.urgency_empty {
+  background: rgba(103, 96, 84, 0.12);
+  color: var(--muted);
+}
+
+.urgency_waiting {
+  background: rgba(42, 125, 139, 0.1);
+  color: var(--secondary);
+}
+
+.urgency_soon {
+  background: rgba(177, 115, 53, 0.16);
+  color: #8d4a19;
+}
+
+.urgency_ready {
+  background: rgba(162, 48, 48, 0.12);
+  color: var(--danger);
+}
+
+.validationBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.validation_accepted {
+  background: rgba(42, 125, 139, 0.1);
+  color: var(--secondary);
+}
+
+.validation_duplicate,
+.validation_ignored_old {
+  background: rgba(177, 115, 53, 0.16);
+  color: #8d4a19;
+}
+
+.timerValue {
+  font-size: clamp(1.7rem, 4vw, 2.4rem);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.timer_empty,
+.timer_waiting {
+  color: var(--text);
+}
+
+.timer_soon {
+  color: #8d4a19;
+}
+
+.timer_ready {
+  color: var(--danger);
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.metaGrid div {
+  display: grid;
+  gap: 4px;
+}
+
+.noteLine {
+  min-height: 1.4rem;
+}
+
+.emptyCard {
+  display: grid;
+  gap: 8px;
+  padding: 20px 22px;
+  border-radius: var(--radius-md);
+}
+
+@media (max-width: 1120px) {
+  .hero,
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .featureGrid,
+  .serverGrid,
+  .bossGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .pageShell {
+    padding-inline: 14px;
+  }
+
+  .heroCopy,
+  .sidePanel,
+  .panelCard,
+  .serverCard {
+    padding: 18px;
+  }
+
+  .featureGrid,
+  .twoColumnFields,
+  .metaGrid,
+  .logFilterRow {
+    grid-template-columns: 1fr;
+  }
+
+  .settingRow {
+    grid-template-columns: 1fr;
+  }
+
+  .sectionHeader,
+  .serverTop,
+  .serverHeader,
+  .bossHeader,
+  .logHeader {
+    flex-direction: column;
+  }
+
+  .serverActions {
+    justify-content: flex-start;
+  }
+
+  .serverHeaderTools {
+    justify-content: flex-start;
+  }
+
+  .filterControls {
+    width: 100%;
+  }
+
+  .heroActions {
+    flex-direction: column;
+  }
+
+  .primaryButton,
+  .ghostButton,
+  .dangerButton {
+    width: 100%;
+  }
+}
